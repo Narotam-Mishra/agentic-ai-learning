@@ -1,0 +1,186 @@
+# =========================================
+# macOS System Files
+# =========================================
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Thumbnails
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+
+# =========================================
+# Python Cache / Compiled Files
+# =========================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# =========================================
+# Virtual Environments
+# =========================================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# pyenv
+.python-version
+
+# =========================================
+# Distribution / Packaging
+# =========================================
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# =========================================
+# Installer Logs
+# =========================================
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =========================================
+# Unit Test / Coverage Reports
+# =========================================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+
+# =========================================
+# Type Checkers / Linters
+# =========================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+.pyre/
+.ruff_cache/
+.pytype/
+
+# =========================================
+# Jupyter Notebook
+# =========================================
+.ipynb_checkpoints
+
+# =========================================
+# Environment Variables / Secrets
+# =========================================
+.env
+.env.*
+*.env
+
+# Secrets
+secrets.json
+credentials.json
+
+# =========================================
+# Logs
+# =========================================
+*.log
+logs/
+
+# =========================================
+# SQLite Databases
+# =========================================
+*.sqlite3
+*.db
+
+# =========================================
+# IDEs / Editors
+# =========================================
+
+# VS Code
+.vscode/
+
+# PyCharm / IntelliJ
+.idea/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+
+# =========================================
+# FastAPI / Streamlit / ML Artifacts
+# =========================================
+.streamlit/
+mlruns/
+wandb/
+tensorboard/
+checkpoints/
+
+# =========================================
+# Temporary Files
+# =========================================
+tmp/
+temp/
+*.tmp
+
+# =========================================
+# Docker
+# =========================================
+docker-compose.override.yml
+
+# =========================================
+# Terraform
+# =========================================
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# =========================================
+# PyInstaller
+# =========================================
+*.manifest
+*.spec
+
+# =========================================
+# Celery
+# =========================================
+celerybeat-schedule
+
+# =========================================
+# SageMath
+# =========================================
+*.sage.py
+
+# =========================================
+# Local Configuration
+# =========================================
+local_settings.py
+config.local.py
