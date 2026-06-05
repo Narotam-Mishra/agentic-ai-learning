@@ -1,5 +1,5 @@
 
-# [Agentic AI using LangGraph]()
+# [Agentic AI using LangGraph](https://chat.deepseek.com/share/m1qobvkz31i2sr1zzp)
 
 ## 01. Agentic AI using LangGraph (16:57)
 
@@ -298,5 +298,308 @@ class ProductionAgent:
 ---
 
 ## 02. Generative AI vs Agentic AI (01:02:43)
+
+This lecture explains the key differences between Generative AI and Agentic AI by walking through a real-world **HR hiring scenario**. The instructor shows how a simple chatbot evolves through 4 stages to become a fully autonomous AI agent.
+
+---
+
+## Important Pointers
+
+| # | Key Takeaway |
+|---|--------------|
+| 1 | **Generative AI** focuses on **creating content** (text, images, video, code, speech) |
+| 2 | **Agentic AI** focuses on **achieving goals** autonomously through planning and action |
+| 3 | GenAI is **reactive** → needs step-by-step human guidance |
+| 4 | Agentic AI is **proactive** → given a goal, it plans and executes autonomously |
+| 5 | Generative AI is a **building block** / subset of Agentic AI |
+| 6 | Agentic AI combines: **Planning + Reasoning + Memory + Tools + LLMs** |
+| 7 | Traditional AI learns patterns between input/output; GenAI learns the **distribution of data** |
+| 8 | GenAI output feels like **human-created** content |
+
+---
+
+## What is Generative AI?
+
+**Simple definition:** A class of AI models that can create **new content** (text, images, audio, code, video) that resembles human-created data.
+
+**How it works (vs Traditional AI):**
+- Traditional AI: Learns relationship between input → output (e.g., classify spam)
+- GenAI: Learns the **entire distribution/nature of data** → can generate **new samples** from that distribution
+
+**Example:** Give a GenAI model many cat images → it learns "what a cat looks like in real life" → then generates a brand new cat image.
+
+```python
+# Conceptual: Traditional AI vs Generative AI
+
+# Traditional AI - Classification
+def traditional_ai_classify(email):
+    # Learns pattern: specific words -> spam or not
+    if "lottery" in email or "prize" in email:
+        return "spam"
+    return "not_spam"
+
+# Generative AI - Content creation
+def generative_ai_generate(prompt):
+    # Learns distribution of human language
+    # Then generates NEW text that feels human-written
+    return model.generate(prompt)  # "Write a poem about cats"
+```
+
+**Popular GenAI applications:**
+- Chatbots: ChatGPT, Gemini, Claude, Grok
+- Image generation: DALL-E, Midjourney
+- Code generation: Code Llama
+- Text-to-speech: Eleven Labs
+- Video generation: Sora, Runway
+
+---
+
+## The Evolution: 4 Chatbot Stages in Hiring Scenario
+
+**Problem:** You're an HR recruiter needing to hire a Backend Engineer (2-4 years experience). Tasks: draft JD → post on job portals → shortlist candidates → schedule interviews → send offer → onboard.
+
+### Stage 1: Simple LLM Chatbot (Basic GenAI)
+
+**How it works:** You ask, chatbot answers. Reactive, generic advice, no memory, no actions.
+
+```python
+class SimpleLLMChatbot:
+    def ask(self, user_query):
+        if "draft JD" in user_query:
+            return "Here's a generic JD: Looking for backend engineer with Python..."
+        elif "interview questions" in user_query:
+            return "Ask about Python, frameworks, problem-solving..."
+        else:
+            return "I can help with basic HR tasks."
+```
+
+**Problems:**
+- ❌ **Reactive** – waits for your prompt
+- ❌ **No memory** – forgets previous conversations
+- ❌ **Generic advice** – not company-specific
+- ❌ **Cannot take actions** – can't post jobs or send emails
+
+---
+
+### Stage 2: RAG-Based Chatbot (Context-Aware)
+
+**RAG = Retrieval Augmented Generation**
+
+Adds company knowledge base (past JDs, hiring playbooks, salary bands, interview question bank, offer letter templates).
+
+```python
+# Simple RAG concept
+class RAGChatbot:
+    def __init__(self, company_knowledge_base):
+        self.kb = company_knowledge_base  # past JDs, salary data, etc.
+    
+    def answer(self, query):
+        # 1. RETRIEVE relevant company documents
+        relevant_docs = self.kb.search(query)
+        
+        # 2. AUGMENT prompt with company context
+        enhanced_prompt = f"Company context: {relevant_docs}\nUser query: {query}"
+        
+        # 3. GENERATE response
+        return self.llm.generate(enhanced_prompt)
+
+# Usage
+kb = CompanyKB(jd_templates=[...], salary_bands=[...], interview_qs=[...])
+bot = RAGChatbot(kb)
+response = bot.answer("Draft JD for backend engineer")
+# Returns: Tailored JD with company-specific tech stack (Python, Django) and salary band
+```
+
+**Improvements:**
+- ✅ **Specific advice** – tailored to company DNA
+- ✅ Uses past hiring data
+
+**Remaining problems:**
+- ❌ Still reactive
+- ❌ No memory
+- ❌ Cannot take actions
+
+---
+
+### Stage 3: Tool-Augmented Chatbot
+
+Adds integrations with external tools via APIs: LinkedIn API, resume parser, calendar API, email API, HRM software.
+
+```python
+class ToolAugmentedChatbot:
+    def __init__(self, tools):
+        self.tools = tools  # e.g., linkedin_api, email_api, calendar_api
+    
+    def execute(self, user_command):
+        if "post job on LinkedIn" in user_command:
+            # Tool use: Actually posts the job
+            return self.tools.linkedin_api.post_job(jd)
+        elif "schedule interview" in user_command:
+            # Tool use: Checks calendar and sends invites
+            free_slots = self.tools.calendar_api.get_free_slots()
+            self.tools.email_api.send_invite(candidate, free_slots[0])
+            return "Interview scheduled"
+        elif "shortlist candidates" in user_command:
+            # Tool use: Downloads and parses resumes
+            resumes = self.tools.linkedin_api.get_resumes()
+            parsed = self.tools.resume_parser.parse(resumes)
+            return self.rank_candidates(parsed)
+
+# Example tools
+class LinkedInAPI:
+    def post_job(self, jd): return "Job posted"
+    def boost_post(self, post_id): return "Post boosted"
+
+class CalendarAPI:
+    def get_free_slots(self): return ["Friday 10 AM", "Friday 2 PM"]
+
+class EmailAPI:
+    def send_email(self, to, subject, body): return "Email sent"
+```
+
+**Improvements:**
+- ✅ Can **take actions** (post jobs, send emails, schedule interviews)
+- ✅ Still has RAG (company-specific)
+
+**Remaining problems:**
+- ❌ Still reactive
+- ❌ No memory / context awareness
+- ❌ Cannot adapt when things go wrong (e.g., low applications)
+
+---
+
+### Stage 4: Agentic AI (The Goal)
+
+**Definition:** An AI system that is **proactive, context-aware, and adaptable** – given a goal, it autonomously plans and executes steps, involving humans only for approval.
+
+```python
+# Simplified Agentic AI concept
+class AgenticAI:
+    def __init__(self, tools, knowledge_base, memory):
+        self.tools = tools
+        self.kb = knowledge_base
+        self.memory = memory  # remembers past steps
+        self.plans = []
+    
+    def run(self, goal):
+        # 1. UNDERSTAND goal
+        # 2. PLAN steps
+        self.plans = self.create_plan(goal)
+        # 3. EXECUTE each step autonomously
+        for step in self.plans:
+            result = self.execute_step(step)
+            self.memory.remember(step, result)
+            # 4. MONITOR and ADAPT if problems arise
+            if self.has_problem(result):
+                self.adapt_plan()
+        return "Goal achieved"
+    
+    def create_plan(self, goal):
+        # "Hire backend engineer" -> 
+        # [draft_JD, post_JD, monitor_applications, shortlist, 
+        #  schedule_interviews, conduct_interviews, send_offer, onboard]
+        return self.llm.plan(goal, self.kb)
+    
+    def execute_step(self, step):
+        if step == "post_JD":
+            return self.tools.linkedin_api.post_job(self.jd)
+        elif step == "monitor_applications":
+            count = self.tools.linkedin_api.get_application_count()
+            if count < 5:  # ADAPTATION
+                self.suggest_boosting()
+            return count
+```
+
+**Key capabilities demonstrated in the video:**
+
+1. **Proactive** – After receiving "Hire a backend engineer", the agent automatically:
+   - Drafts JD using company data
+   - Posts to LinkedIn & Naukri
+   - Monitors application counts
+   - Notifies when applications are low
+   - Suggests solutions (broaden JD, boost posts)
+   - Gets human approval, then executes changes
+
+2. **Context-aware (Memory)** – Remembers:
+   - That it already drafted a JD
+   - Which platforms it posted to
+   - Which candidates were shortlisted
+   - That interviews are scheduled for Friday
+
+3. **Adaptable** – When only 2 applications came (below expectation), the agent:
+   - Detected the problem autonomously
+   - Suggested: "Broaden JD to include Full Stack" + "Boost LinkedIn post"
+   - Waited for human approval, then executed both
+
+4. **Tool usage** – Posts jobs, checks calendar, sends emails, parses resumes, triggers onboarding
+
+5. **Human-in-the-loop** – Asks for approvals at key decision points, but does all heavy lifting
+
+```python
+# Practical example: Agentic hiring flow
+class HiringAgent(AgenticAI):
+    def run_hiring(self, role, experience_years):
+        # Step 1: Draft JD
+        jd = self.draft_jd(role, experience_years)
+        self.request_approval("JD ready", jd)
+        
+        # Step 2: Post jobs
+        self.post_to_platforms(jd, ["LinkedIn", "Naukri"])
+        
+        # Step 3: Monitor (proactive)
+        while self.days_elapsed < 7:
+            apps = self.check_applications()
+            if apps < 5 and self.days_elapsed > 2:
+                # Self-adaptation
+                self.suggest_and_execute("Low applications. Boost posts?")
+            time.sleep(86400)
+        
+        # Step 4: Auto-shortlist using resume parser
+        candidates = self.parse_and_rank_resumes()
+        self.notify_user(f"Top {len(candidates)} candidates identified")
+        
+        # Step 5: Auto-schedule interviews via calendar
+        slots = self.get_free_slots()
+        self.send_invites(candidates[:2], slots[0])
+        
+        # Step 6: After interview feedback, auto-send offer
+        self.generate_and_send_offer(selected_candidate)
+        
+        # Step 7: Trigger onboarding
+        self.trigger_onboarding(selected_candidate)
+        return "Hiring complete"
+```
+
+---
+
+## Final Comparison Table
+
+| Feature | Generative AI | Agentic AI |
+|---------|---------------|------------|
+| **Primary focus** | Create content (text, images, etc.) | Achieve a goal |
+| **Behavior** | Reactive – responds to prompts | Proactive – initiates actions |
+| **Human involvement** | Guides every step | Only gives high-level goal + approvals |
+| **Memory** | Typically none (stateless) | Has context memory |
+| **Tool use** | No (can't act) | Yes (calls APIs, sends emails, etc.) |
+| **Adaptability** | No | Yes – detects problems and adjusts plans |
+| **Planning** | No | Yes – breaks goals into steps |
+| **Example** | "Write a job description" | "Hire a backend engineer" → agent does everything |
+
+---
+
+## Key Quote from Video
+
+> **"Generative AI is a capability, Agentic AI is a behavior."**
+
+Agentic AI uses GenAI (LLMs) as its **brain** for reasoning and planning, but adds:
+- Memory
+- Tool use
+- Planning & reasoning loops
+- Adaptability
+- Autonomy
+
+---
+
+## 03. What is Agentic AI? (01:00:24)
 
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
