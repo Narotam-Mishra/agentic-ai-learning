@@ -2283,4 +2283,261 @@ print("Final approved draft:\n", result["draft"])
 
 - [Human-in-the-loop](https://docs.langchain.com/oss/python/langchain/human-in-the-loop)
 
+---
+
+## 5. LangGraph Core Concepts (51:51)
+
+This lecture provides a **quick revision of LangGraph** and then dives deep into the **core concept of LLM workflows** – what they are and the **five most common workflow patterns** you will encounter when building agentic applications.
+
+---
+
+## 📌 Important Pointers
+
+| # | Key Point |
+|---|------------|
+| 1 | **LangGraph** is an **orchestration framework** that represents any LLM workflow as a **graph** – nodes = tasks, edges = control flow. |
+| 2 | LangGraph features: parallel execution, loops, conditional branching, memory (state persistence), and resumability (fault tolerance). |
+| 3 | **LLM Workflow** = a series of tasks executed in a specific order to achieve a goal, where many tasks involve calling LLMs. |
+| 4 | **Prompt Chaining** – sequential LLM calls; output of one becomes input of the next. Used for complex tasks broken into steps. |
+| 5 | **Routing** – an LLM classifies the input and sends it to a specialized handler (different LLM or logic). |
+| 6 | **Parallelization** – split a task into independent subtasks, run them in parallel, then aggregate results. |
+| 7 | **Orchestrator‑Workers** – similar to parallelization, but the subtasks are **dynamically determined** by an orchestrator LLM based on the input. |
+| 8 | **Evaluator‑Optimizer** – iterative loop: a generator LLM creates a solution, an evaluator LLM gives feedback; repeat until acceptable. |
+| 9 | LangGraph is **not a replacement for LangChain** – you will use **both** together. LangChain provides components (models, prompts, tools); LangGraph orchestrates them. |
+
+---
+
+## 1. What is LangGraph? (Quick Revision)
+
+> **LangGraph is an orchestration framework for building intelligent, stateful, multi‑step LLM workflows.**
+
+- It takes any LLM workflow and represents it as a **graph**.
+- **Nodes** = individual tasks (e.g., call an LLM, call a tool, make a decision).
+- **Edges** = control flow that determines which node runs next.
+
+**Key features:**
+- **Parallel execution** – multiple nodes can run simultaneously.
+- **Loops** – nodes can go back to previous nodes (cycles).
+- **Conditional branching** – choose next node based on a condition.
+- **Memory** – persist state across steps (short‑term and long‑term).
+- **Resumability** – if the workflow crashes, you can resume from the last checkpoint.
+
+```python
+# Conceptual LangGraph structure
+from langgraph.graph import StateGraph, END
+
+# Define state
+class WorkflowState(TypedDict):
+    data: str
+    step_done: bool
+
+# Define nodes (tasks)
+def step_one(state: WorkflowState) -> WorkflowState:
+    # do something
+    return {**state, "step_done": True}
+
+def step_two(state: WorkflowState) -> WorkflowState:
+    # do something else
+    return state
+
+# Build graph
+graph = StateGraph(WorkflowState)
+graph.add_node("step_one", step_one)
+graph.add_node("step_two", step_two)
+graph.set_entry_point("step_one")
+graph.add_edge("step_one", "step_two")
+graph.add_edge("step_two", END)
+
+# Compile and run
+app = graph.compile()
+result = app.invoke({"data": "input", "step_done": False})
+```
+
+---
+
+## 2. What is an LLM Workflow?
+
+**Workflow** = a series of tasks executed in a specific order to achieve a goal.  
+**LLM Workflow** = a workflow where many of those tasks involve calling LLMs (e.g., generating text, reasoning, tool calling, decision making).
+
+Example from previous video: **Automated Hiring Workflow**  
+Tasks: draft JD → post JD → monitor applications → shortlist candidates → schedule interviews → conduct interviews → send offer → onboard. Each task may use an LLM.
+
+Workflows can be:
+- **Linear** – A → B → C
+- **Parallel** – A splits into B and C running simultaneously
+- **Branching** – if condition then D else E
+- **Looped** – repeat a task until condition met
+
+---
+
+## 3. Five Common LLM Workflow Patterns
+
+### 3.1 Prompt Chaining
+
+**What it is:** Sequential LLM calls where the output of one becomes the input of the next.
+
+**When to use:** When a complex task can be broken into a fixed sequence of simpler subtasks, and you want to check intermediate results.
+
+**Example:** Generate a detailed report from a topic.
+1. LLM #1: Create an outline from the topic.
+2. (Optional) Validate outline length.
+3. LLM #2: Generate a detailed report based on the outline.
+
+```python
+# Conceptual code for Prompt Chaining
+def prompt_chain(topic):
+    # Step 1: Generate outline
+    outline = llm.invoke(f"Create an outline for a report on {topic}")
+    
+    # Optional validation
+    if len(outline) > 1000:
+        raise ValueError("Outline too long")
+    
+    # Step 2: Generate report from outline
+    report = llm.invoke(f"Based on this outline, write a detailed report:\n{outline}")
+    return report
+```
+
+---
+
+### 3.2 Routing
+
+**What it is:** An LLM (or a classifier) examines the input and **routes** it to a specialized handler (different LLM, different prompt, or different tool). Each handler is optimized for a specific type of request.
+
+**When to use:** When you have different categories of requests (e.g., customer support: refund, technical, sales) and you want to use the best‑suited LLM for each.
+
+**Example:** Customer support chatbot.
+- Input query → Router LLM classifies as “refund”, “technical”, or “sales”.
+- Then send to respective handler.
+
+```python
+# Conceptual Routing
+def route_query(user_query):
+    # Router LLM decides category
+    category = router_llm.invoke(f"Classify this query into: refund, technical, sales.\nQuery: {user_query}")
+    
+    if category == "refund":
+        return refund_handler(user_query)
+    elif category == "technical":
+        return technical_handler(user_query)
+    else:
+        return sales_handler(user_query)
+```
+
+---
+
+### 3.3 Parallelization
+
+**What it is:** Break a single task into **independent subtasks**, run them **in parallel** (simultaneously), then **aggregate** the results to produce a final output.
+
+**When to use:** When multiple independent checks or evaluations must be performed on the same input, and they do not depend on each other.
+
+**Example:** YouTube content moderation – check a video against three independent criteria:
+- Community guidelines
+- Misinformation
+- Sexual content
+
+All three checks can run at the same time. If any fails, the video is flagged.
+
+```python
+# Conceptual Parallelization (using asyncio or threads)
+import asyncio
+
+async def moderate_video(video_transcript):
+    # Run three checks in parallel
+    results = await asyncio.gather(
+        check_guidelines(video_transcript),
+        check_misinformation(video_transcript),
+        check_sexual_content(video_transcript)
+    )
+    # Aggregate: if any fails, reject
+    if all(results):
+        return "APPROVED"
+    else:
+        return "FLAGGED"
+```
+
+---
+
+### 3.4 Orchestrator‑Workers
+
+**What it is:** Similar to parallelization, but the **subtasks are not fixed** – an **orchestrator LLM** dynamically decides what tasks to create and which worker LLM should execute them, based on the input.
+
+**When to use:** When the nature of subtasks depends on the input, and you cannot pre‑define them.
+
+**Example:** Research assistant that answers a complex query.
+- Query: “Explain the impact of LLMs on software engineering.”
+- Orchestrator decides: need to search Google Scholar for academic papers, search news for recent developments, maybe search GitHub for relevant repositories.
+- Workers perform these parallel searches, then results are aggregated into a report.
+
+```python
+# Conceptual Orchestrator-Workers
+def research_assistant(query):
+    # Orchestrator decides what to search and where
+    subtasks = orchestrator_llm.invoke(f"Given this query: '{query}', list the search tasks (e.g., 'search_google_scholar', 'search_news')")
+    
+    # Execute all subtasks in parallel
+    results = []
+    for task in subtasks:
+        if task == "search_google_scholar":
+            results.append(search_google_scholar(query))
+        elif task == "search_news":
+            results.append(search_news(query))
+        # ... other tasks
+    # Aggregate results into a final report
+    return aggregate_results(results)
+```
+
+---
+
+### 3.5 Evaluator‑Optimizer
+
+**What it is:** An **iterative** workflow with two LLMs:
+- **Generator** – creates an initial solution (e.g., email draft, blog post, poem).
+- **Evaluator** – checks the solution against criteria, either **accepts** it or provides **feedback**.
+- The generator then **refines** the solution based on feedback, and the loop repeats until the evaluator accepts.
+
+**When to use:** For creative or open‑ended tasks where a perfect output is rarely achieved in one attempt (writing, code generation, design).
+
+**Example:** Writing a professional email.
+- Generator writes a draft.
+- Evaluator checks for tone, length, clarity – if not satisfied, gives feedback (“too informal, add a greeting”).
+- Generator rewrites.
+- Loop continues until evaluator approves.
+
+```python
+# Conceptual Evaluator-Optimizer
+def write_email(topic, max_iterations=5):
+    solution = ""
+    for i in range(max_iterations):
+        if i == 0:
+            solution = generator_llm.invoke(f"Draft an email about: {topic}")
+        else:
+            solution = generator_llm.invoke(f"Improve this email based on feedback:\nEmail: {solution}\nFeedback: {feedback}")
+        
+        # Evaluate
+        evaluation, feedback = evaluator_llm.invoke(f"Evaluate this email (accept/reject). If reject, give feedback:\nEmail: {solution}")
+        
+        if evaluation == "accept":
+            return solution
+    return solution  # return last attempt even if not perfect
+```
+
+---
+
+## 4. LangGraph vs LangChain – Final Clarification
+
+| Aspect | LangChain | LangGraph |
+|--------|-----------|-----------|
+| **Purpose** | Provides components (models, prompts, retrievers, tools) | Orchestrates workflows (graphs) |
+| **Workflow style** | Linear chains | Non‑linear graphs (loops, branches, parallel) |
+| **State management** | Not built‑in (manual) | Built‑in stateful execution |
+| **When to use** | Simple, linear tasks | Complex, non‑linear, long‑running workflows |
+
+> **Important:** LangGraph is **built on top of LangChain**. You will **always use both** – LangChain components inside LangGraph nodes. Your LangChain knowledge is **not wasted**.
+
+---
+
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
