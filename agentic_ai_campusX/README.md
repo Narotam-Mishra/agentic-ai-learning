@@ -2905,7 +2905,7 @@ for step_output in app.stream(initial):
 
 ## First Practical Workflow in LangGraph – BMI Calculator
 
-This part of lecture video marks the **start of the practical coding part**. After covering theory in the first four videos, the instructor walks through:
+This part of lecture marks the **start of the practical coding part**. After covering theory in the first four videos, the instructor walks through:
 
 - **Installing LangGraph** and required libraries
 - **Creating a virtual environment**
