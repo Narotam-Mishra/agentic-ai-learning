@@ -2903,4 +2903,321 @@ for step_output in app.stream(initial):
 
 ## 06. Sequential Workflows in LangGraph (49:12)
 
+## First Practical Workflow in LangGraph – BMI Calculator
+
+This part of lecture video marks the **start of the practical coding part**. After covering theory in the first four videos, the instructor walks through:
+
+- **Installing LangGraph** and required libraries
+- **Creating a virtual environment**
+- **Building a simple sequential workflow** (BMI calculator) to understand:
+  - Defining **State** with `TypedDict`
+  - Creating **nodes** (as Python functions)
+  - Adding **edges** (including `START` and `END`)
+  - **Compiling** and **invoking** the graph
+  - **Visualising** the graph in a Jupyter notebook
+- **Extending** the workflow to a **two‑node sequential** workflow (calculate BMI → label category)
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept / Step | Explanation |
+|---|----------------|--------------|
+| 1 | **LangGraph is not a replacement for LangChain** | You use both together – LangChain provides components (LLMs, prompts, tools); LangGraph orchestrates them. |
+| 2 | **Installation** | Create a virtual environment, then `pip install langgraph langchain langchain-openai python-dotenv`. |
+| 3 | **Jupyter Notebook** | Recommended for development because you can **visualise graphs** easily (not possible in plain `.py` files). |
+| 4 | **State** | A `TypedDict` that holds all data that flows through the workflow. Must be defined before building the graph. |
+| 5 | **Nodes** | Each node is a **Python function** that receives the current state and returns an updated state. |
+| 6 | **Edges** | Define the control flow. Special nodes: `START` (entry point) and `END` (termination). |
+| 7 | **Compile** | `graph.compile()` checks the graph structure (no orphaned nodes, etc.) and returns a runnable object. |
+| 8 | **Invoke** | `compiled_graph.invoke(initial_state)` executes the workflow and returns the final state. |
+| 9 | **Visualisation** | Use `draw_mermaid` or helper code from LangGraph docs to see the graph as a diagram (Jupyter only). |
+| 10 | **Sequential workflow** | Linear chain of nodes: A → B → C. No branching, no loops, no parallelism. |
+
+---
+
+## 1. Installation & Setup
+
+### Create a virtual environment (Windows example)
+
+```bash
+python -m venv myenv
+myenv\Scripts\activate
+```
+
+### Install required packages
+
+```bash
+pip install langgraph langchain langchain-openai python-dotenv
+```
+
+- **`langgraph`** – the orchestration framework
+- **`langchain`** – provides components (models, prompts, retrievers, etc.)
+- **`langchain-openai`** – OpenAI integration (used in later videos)
+- **`python-dotenv`** – to read environment variables (e.g., API keys)
+
+### Use Jupyter Notebook
+
+```bash
+jupyter notebook   # or use VS Code with Python Interactive
+```
+
+> **Why Jupyter?** LangGraph provides a way to **visualise the graph as a diagram** – this only works inside a Jupyter environment.
+
+---
+
+## 2. First Workflow: Single‑Node BMI Calculator
+
+**Workflow description:**  
+Input: weight (kg) and height (m) → calculate BMI → output BMI value.  
+That’s one task → one node.
+
+### Step 1: Imports
+
+```python
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+```
+
+### Step 2: Define the State
+
+The state must contain all data that will be passed between nodes.
+
+```python
+class BMIState(TypedDict):
+    weight: float   # in kg
+    height: float   # in meters
+    bmi: float      # calculated value
+```
+
+**Explanation:**  
+`TypedDict` is a special dictionary that lets you specify the **type** of each key. This helps with code completion and error checking.
+
+### Step 3: Define the Node (as a Python function)
+
+```python
+def calculate_bmi(state: BMIState) -> BMIState:
+    weight = state["weight"]
+    height = state["height"]
+    bmi = weight / (height ** 2)
+    # Update the state with the new value
+    state["bmi"] = round(bmi, 2)
+    return state
+```
+
+**Key points:**
+- The function receives the **current state**.
+- It reads required fields (`weight`, `height`).
+- It **modifies** the state (adds `bmi`).
+- It returns the **updated state** (LangGraph will pass it to the next node).
+
+### Step 4: Build the Graph
+
+```python
+# Create a graph that uses our state
+graph = StateGraph(BMIState)
+
+# Add the node – give it a name and the function
+graph.add_node("calculate_bmi", calculate_bmi)
+
+# Define edges: START → calculate_bmi → END
+graph.add_edge(START, "calculate_bmi")
+graph.add_edge("calculate_bmi", END)
+
+# Set the entry point (alternative to START edge)
+# graph.set_entry_point("calculate_bmi")  # works too
+```
+
+**Explanation:**
+- `StateGraph(BMIState)` creates a new graph that understands the shape of the state.
+- `add_node(name, function)` – every node must have a unique name.
+- `START` and `END` are special built‑in nodes that mark the beginning and end of the graph.
+
+### Step 5: Compile the Graph
+
+```python
+workflow = graph.compile()
+```
+
+**What happens during compilation?**  
+LangGraph checks for structural errors (e.g., orphan nodes, cycles if not intended). If everything is fine, it returns a **runnable** object.
+
+### Step 6: Invoke (Execute) the Workflow
+
+```python
+initial_state = {"weight": 80.0, "height": 1.73, "bmi": 0.0}
+final_state = workflow.invoke(initial_state)
+print(final_state)
+```
+
+**Output:**
+
+```python
+{'weight': 80.0, 'height': 1.73, 'bmi': 26.73}
+```
+
+> **Note:** The `bmi` field was `0.0` initially; after execution it contains the calculated value.
+
+### Step 7: Visualise the Graph (Jupyter only)
+
+```python
+from IPython.display import Image, display
+from langgraph.graph import draw_mermaid
+
+display(Image(workflow.get_graph().draw_mermaid_png()))
+```
+
+**Result:** A picture showing `START → calculate_bmi → END`.
+
+---
+
+## 3. Extending to a Two‑Node Sequential Workflow
+
+Add a second node that **classifies the BMI** into categories: underweight, normal, overweight, obese.
+
+### Step 1: Update the State
+
+Add a new field `category: str`.
+
+```python
+class BMIState(TypedDict):
+    weight: float
+    height: float
+    bmi: float
+    category: str          # new field
+```
+
+### Step 2: Define the Second Node
+
+```python
+def label_bmi(state: BMIState) -> BMIState:
+    bmi = state["bmi"]
+    if bmi < 18.5:
+        category = "Underweight"
+    elif bmi < 25:
+        category = "Normal"
+    elif bmi < 30:
+        category = "Overweight"
+    else:
+        category = "Obese"
+    state["category"] = category
+    return state
+```
+
+### Step 3: Add the Node and Edges to the Graph
+
+```python
+# Add the new node
+graph.add_node("label_bmi", label_bmi)
+
+# Sequential edges: START → calculate_bmi → label_bmi → END
+graph.add_edge(START, "calculate_bmi")
+graph.add_edge("calculate_bmi", "label_bmi")
+graph.add_edge("label_bmi", END)
+
+# Compile again
+workflow = graph.compile()
+```
+
+### Step 4: Run the Workflow
+
+```python
+initial_state = {"weight": 80.0, "height": 1.73, "bmi": 0.0, "category": ""}
+final_state = workflow.invoke(initial_state)
+print(final_state)
+```
+
+**Output:**
+
+```python
+{'weight': 80.0, 'height': 1.73, 'bmi': 26.73, 'category': 'Overweight'}
+```
+
+### Visualisation of the Two‑Node Graph
+
+```
+START → calculate_bmi → label_bmi → END
+```
+
+---
+
+## 4. Complete Code Example (Copy‑Ready)
+
+```python
+# BMI Workflow with two nodes
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+# 1. Define state
+class BMIState(TypedDict):
+    weight: float
+    height: float
+    bmi: float
+    category: str
+
+# 2. Define nodes
+def calculate_bmi(state: BMIState) -> BMIState:
+    weight = state["weight"]
+    height = state["height"]
+    bmi = weight / (height ** 2)
+    state["bmi"] = round(bmi, 2)
+    return state
+
+def label_bmi(state: BMIState) -> BMIState:
+    bmi = state["bmi"]
+    if bmi < 18.5:
+        state["category"] = "Underweight"
+    elif bmi < 25:
+        state["category"] = "Normal"
+    elif bmi < 30:
+        state["category"] = "Overweight"
+    else:
+        state["category"] = "Obese"
+    return state
+
+# 3. Build graph
+graph = StateGraph(BMIState)
+graph.add_node("calculate_bmi", calculate_bmi)
+graph.add_node("label_bmi", label_bmi)
+
+# 4. Add edges (sequential)
+graph.add_edge(START, "calculate_bmi")
+graph.add_edge("calculate_bmi", "label_bmi")
+graph.add_edge("label_bmi", END)
+
+# 5. Compile
+workflow = graph.compile()
+
+# 6. Run
+initial = {"weight": 80.0, "height": 1.73, "bmi": 0.0, "category": ""}
+result = workflow.invoke(initial)
+print(result)
+```
+
+---
+
+## 5. Key Takeaways for Beginners
+
+| Concept | What you did |
+|---------|---------------|
+| **State** | Defined a `TypedDict` with all fields that the workflow needs. |
+| **Node** | Wrote a Python function that reads from state and writes updates. |
+| **Graph** | Created a `StateGraph` passing the state class. |
+| **Adding nodes** | Used `graph.add_node("name", function)`. |
+| **Edges** | Connected nodes using `graph.add_edge(from, to)`. Used `START` and `END`. |
+| **Compilation** | `graph.compile()` produces a runnable workflow. |
+| **Invocation** | `workflow.invoke(initial_state)` runs the graph and returns the final state. |
+| **Visualisation** | `workflow.get_graph().draw_mermaid_png()` shows the graph diagram (Jupyter only). |
+
+---
+
+## 6. Why This Matters
+
+- This simple **sequential workflow** is the foundation of **all LangGraph applications**.
+- Even complex agentic systems are built by adding more nodes, conditional edges, loops, and parallel branches – but **every graph starts with this basic pattern**.
+- Once you master this, you can move to **prompt chaining**, **routing**, **parallelisation**, and finally **full agentic AI** where the LLM decides which node to run next.
+
+---
+
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
