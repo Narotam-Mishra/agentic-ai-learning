@@ -3219,5 +3219,321 @@ print(result)
 
 ---
 
+## LLM Workflows in LangGraph – QA & Prompt Chaining 
+
+This part of tutorial shows how to build **sequential LLM workflows** in LangGraph:
+
+1. **Single‑node QA workflow** – ask an LLM a question, get an answer.
+2. **Two‑node prompt chaining workflow** – generate an outline from a topic, then generate a full blog post from the outline.
+
+The instructor also explains **why LangGraph is overkill for simple linear workflows** but essential when you need to **preserve intermediate state** (e.g., keeping the outline and the final blog together).
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **LLM workflow** | A workflow where at least one node calls an LLM. |
+| 2 | **State for QA** | `question` (str) and `answer` (str). |
+| 3 | **State for prompt chaining** | `topic`, `outline`, `content` (all strings). |
+| 4 | **Node implementation** | Inside a node: extract data from state, build a prompt, call LLM, update state, return state. |
+| 5 | **LangChain integration** | LangGraph nodes use LangChain components (`ChatOpenAI`, prompts, etc.). They work together seamlessly. |
+| 6 | **Why preserve intermediate state?** | In LangChain chains, you lose intermediate outputs (only final result). In LangGraph, the state keeps everything – useful for debugging, auditing, or further processing. |
+| 7 | **Homework** | Add a third node that **evaluates the blog** based on the outline and generates a score. |
+
+---
+
+## 1. Setup for LLM Workflows
+
+Before building, you need:
+
+- **OpenAI API key** stored in a `.env` file (or environment variable).
+- Imports: `StateGraph`, `START`, `END`, `TypedDict`, `ChatOpenAI`, `load_dotenv`.
+
+```python
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()                     # loads OPENAI_API_KEY from .env
+model = ChatOpenAI(model="gpt-4")
+```
+
+---
+
+## 2. Simple QA Workflow (One Node)
+
+**Goal:** Ask a question → LLM answers → print answer.
+
+### Step 1: Define State
+
+```python
+class LLMState(TypedDict):
+    question: str
+    answer: str
+```
+
+### Step 2: Define the Node (LLM call)
+
+```python
+def llm_qa(state: LLMState) -> LLMState:
+    question = state["question"]
+    prompt = f"Answer the following question:\n{question}"
+    response = model.invoke(prompt)
+    state["answer"] = response.content
+    return state
+```
+
+### Step 3: Build Graph
+
+```python
+graph = StateGraph(LLMState)
+graph.add_node("llm_qa", llm_qa)
+graph.add_edge(START, "llm_qa")
+graph.add_edge("llm_qa", END)
+workflow = graph.compile()
+```
+
+### Step 4: Run
+
+```python
+initial_state = {"question": "How far is the moon from the earth?", "answer": ""}
+final_state = workflow.invoke(initial_state)
+print(final_state["answer"])
+```
+
+**Why this is still useful?** Because now you have both question and answer in the final state. In a simple direct call you would not keep the question.
+
+---
+
+## 3. Prompt Chaining Workflow (Two Nodes)
+
+**Goal:**  
+User gives a **topic** → Node 1 generates an **outline** → Node 2 generates a **full blog post** from the outline.
+
+### Step 1: Define State
+
+```python
+class BlogState(TypedDict):
+    topic: str
+    outline: str
+    content: str
+```
+
+### Step 2: Define Nodes
+
+#### Node 1: Generate Outline
+
+```python
+def create_outline(state: BlogState) -> BlogState:
+    topic = state["topic"]
+    prompt = f"Generate a detailed outline for a blog on the topic: {topic}"
+    response = model.invoke(prompt)
+    state["outline"] = response.content
+    return state
+```
+
+#### Node 2: Generate Blog from Outline
+
+```python
+def create_blog(state: BlogState) -> BlogState:
+    topic = state["topic"]
+    outline = state["outline"]
+    prompt = f"Write a detailed blog on '{topic}' using this outline:\n{outline}"
+    response = model.invoke(prompt)
+    state["content"] = response.content
+    return state
+```
+
+### Step 3: Build Graph
+
+```python
+graph = StateGraph(BlogState)
+graph.add_node("create_outline", create_outline)
+graph.add_node("create_blog", create_blog)
+graph.add_edge(START, "create_outline")
+graph.add_edge("create_outline", "create_blog")
+graph.add_edge("create_blog", END)
+workflow = graph.compile()
+```
+
+### Step 4: Run
+
+```python
+initial_state = {"topic": "Rise of AI in India", "outline": "", "content": ""}
+final_state = workflow.invoke(initial_state)
+print("Outline:\n", final_state["outline"])
+print("\nBlog Content:\n", final_state["content"])
+```
+
+**Key advantage over LangChain chains:**  
+- The final state contains **both the outline and the content** – not just the final output.  
+- You can later add more nodes that use the outline or the content.
+
+---
+
+## 4. Why LangGraph Even for Simple Sequential Workflows?
+
+For a single LLM call or a simple two‑step chain, **LangGraph is overkill** – you could just call the LLM directly.  
+However, LangGraph forces you to use **state**, which means:
+
+- All intermediate results are **preserved**.
+- You can easily **insert new steps** (like evaluation) without breaking the flow.
+- You can later add **conditional routing** (e.g., if the outline is too short, regenerate) without rewriting everything.
+
+> *“It’s like going around your elbow to scratch your nose, but the real power appears when workflows become complex.”*
+
+---
+
+## 5. Homework Solution: Add an Evaluator Node
+
+**Task:** Add a third node that evaluates the blog based on the outline and generates a score (integer 1‑10). Update the state to include the score.
+
+### Step 1: Update State
+
+Add a new field `score: int` (or `float`).
+
+```python
+class BlogState(TypedDict):
+    topic: str
+    outline: str
+    content: str
+    score: int               # new field
+```
+
+### Step 2: Define the Evaluator Node
+
+```python
+def evaluate_blog(state: BlogState) -> BlogState:
+    outline = state["outline"]
+    content = state["content"]
+    prompt = f"""
+    You are an evaluator. Given the outline and the final blog content, rate the blog on a scale of 1 to 10.
+    Respond with only the integer score.
+
+    Outline:
+    {outline}
+
+    Blog Content:
+    {content}
+
+    Score (1-10):
+    """
+    response = model.invoke(prompt)
+    try:
+        score = int(response.content.strip())
+    except:
+        score = 5   # default fallback
+    state["score"] = score
+    return state
+```
+
+### Step 3: Add Node and Edges
+
+Insert the evaluator after `create_blog` and before `END`.
+
+```python
+graph.add_node("evaluate_blog", evaluate_blog)
+# ... existing edges ...
+graph.add_edge("create_blog", "evaluate_blog")   # chain: outline → blog → evaluate
+graph.add_edge("evaluate_blog", END)
+```
+
+### Step 4: Run and See the Score
+
+```python
+initial_state = {"topic": "Rise of AI in India", "outline": "", "content": "", "score": 0}
+final_state = workflow.invoke(initial_state)
+print("Score:", final_state["score"])
+```
+
+**Full updated graph structure:**  
+`START → create_outline → create_blog → evaluate_blog → END`
+
+---
+
+## 6. Complete Code for Prompt Chaining + Evaluation (Homework Solution)
+
+```python
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+model = ChatOpenAI(model="gpt-4")
+
+class BlogState(TypedDict):
+    topic: str
+    outline: str
+    content: str
+    score: int
+
+def create_outline(state: BlogState) -> BlogState:
+    topic = state["topic"]
+    prompt = f"Generate a detailed outline for a blog on: {topic}"
+    response = model.invoke(prompt)
+    state["outline"] = response.content
+    return state
+
+def create_blog(state: BlogState) -> BlogState:
+    topic = state["topic"]
+    outline = state["outline"]
+    prompt = f"Write a detailed blog on '{topic}' using this outline:\n{outline}"
+    response = model.invoke(prompt)
+    state["content"] = response.content
+    return state
+
+def evaluate_blog(state: BlogState) -> BlogState:
+    outline = state["outline"]
+    content = state["content"]
+    prompt = f"""
+    Rate the blog (1-10) based on how well it follows the outline and quality.
+    Outline: {outline}
+    Blog: {content}
+    Output only the integer score.
+    """
+    response = model.invoke(prompt)
+    try:
+        state["score"] = int(response.content.strip())
+    except:
+        state["score"] = 5
+    return state
+
+# Build graph
+graph = StateGraph(BlogState)
+graph.add_node("create_outline", create_outline)
+graph.add_node("create_blog", create_blog)
+graph.add_node("evaluate_blog", evaluate_blog)
+
+graph.add_edge(START, "create_outline")
+graph.add_edge("create_outline", "create_blog")
+graph.add_edge("create_blog", "evaluate_blog")
+graph.add_edge("evaluate_blog", END)
+
+workflow = graph.compile()
+
+# Run
+initial = {"topic": "Rise of AI in India", "outline": "", "content": "", "score": 0}
+final = workflow.invoke(initial)
+print(f"Score: {final['score']}/10")
+# Print outline or content if needed
+```
+
+---
+
+## 7. Key Takeaways
+
+- **LangGraph nodes can contain any Python code** – including LLM calls, API calls, calculations, etc.
+- **State is the central concept** – it passes through all nodes and accumulates data.
+- **Sequential workflows** are built by adding simple edges (`START → A → B → END`).
+- **LangChain components** (like `ChatOpenAI`) are used **inside** nodes.
+- The real benefit of LangGraph appears when you add **branching, looping, human‑in‑the‑loop, or parallel execution** – which will be covered in upcoming videos.
+
+---
+
+## 07. Parallel Workflows in LangGraph (59:28)
 
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
