@@ -3536,4 +3536,292 @@ print(f"Score: {final['score']}/10")
 
 ## 07. Parallel Workflows in LangGraph (59:28)
 
+This part of lecture shows how to build **parallel workflows** in LangGraph using two examples:
+
+1. **Cricket statistics calculator** – a non‑LLM parallel workflow that calculates strike rate, boundary percentage, and balls per boundary from the same input data.
+2. **Essay evaluation system** – an LLM‑based parallel workflow that evaluates an essay on three aspects (clarity, depth, language) simultaneously.
+
+The key learning is **how to return partial state updates** instead of the full state when nodes run in parallel, to avoid update conflicts.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Parallel workflow** | Multiple nodes execute simultaneously from the same parent node. |
+| 2 | **Use case** | When you have independent calculations on the same input data (e.g., different statistics, different evaluation criteria). |
+| 3 | **The conflict problem** | If each parallel node returns the **entire updated state**, LangGraph sees conflicting updates to the same keys (e.g., `runs`, `balls`) and throws an `InvalidUpdateError`. |
+| 4 | **Solution: Partial state updates** | Each node should return **only the keys it actually changed** (a dictionary with just those fields). LangGraph merges them automatically. |
+| 5 | **Best practice** | Always return **partial state updates** (a dict of only the fields you modified) – works for both sequential and parallel workflows. |
+| 6 | **Visualising parallel graphs** | Edges from `START` to multiple nodes create parallel execution. Use `add_edge(START, node1)`, `add_edge(START, node2)`, etc. |
+| 7 | **Merging parallel results** | Add a final node that collects all parallel outputs (e.g., a `summary` node) and connects all parallel nodes to it. |
+
+---
+
+## 1. First Example: Cricket Stats Calculator (Non‑LLM Parallel Workflow)
+
+**Goal:** Given runs, balls, fours, sixes, calculate:
+- Strike rate = (runs / balls) × 100
+- Boundary percentage = (4×fours + 6×sixes) / runs × 100
+- Balls per boundary = balls / (fours + sixes)
+
+These three calculations are **independent** → can run in parallel.
+
+### Graph Structure
+
+```
+START ──┬──> calculate_strike_rate ──┐
+        ├──> calculate_boundary_percent ──> summary_node ──> END
+        └──> calculate_balls_per_boundary ──┘
+```
+
+### Step 1: Define State
+
+```python
+from typing import TypedDict
+
+class BatsmanState(TypedDict):
+    runs: int
+    balls: int
+    fours: int
+    sixes: int
+    strike_rate: float
+    boundary_percent: float
+    balls_per_boundary: float
+    summary: str
+```
+
+### Step 2: Define Nodes (with **partial updates**)
+
+```python
+def calculate_strike_rate(state: BatsmanState):
+    sr = (state["runs"] / state["balls"]) * 100
+    # Return ONLY the field we changed
+    return {"strike_rate": round(sr, 2)}
+
+def calculate_boundary_percent(state: BatsmanState):
+    boundary_runs = (state["fours"] * 4) + (state["sixes"] * 6)
+    percent = (boundary_runs / state["runs"]) * 100
+    return {"boundary_percent": round(percent, 2)}
+
+def calculate_balls_per_boundary(state: BatsmanState):
+    total_boundaries = state["fours"] + state["sixes"]
+    bpb = state["balls"] / total_boundaries if total_boundaries > 0 else 0
+    return {"balls_per_boundary": round(bpb, 2)}
+
+def generate_summary(state: BatsmanState):
+    summary = f"""
+    Strike Rate: {state['strike_rate']}
+    Boundary %: {state['boundary_percent']}
+    Balls per Boundary: {state['balls_per_boundary']}
+    """
+    return {"summary": summary}
+```
+
+### Step 3: Build Graph with Parallel Edges
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+graph = StateGraph(BatsmanState)
+graph.add_node("calc_sr", calculate_strike_rate)
+graph.add_node("calc_bp", calculate_boundary_percent)
+graph.add_node("calc_bpb", calculate_balls_per_boundary)
+graph.add_node("summary", generate_summary)
+
+# Parallel edges from START to all three calculators
+graph.add_edge(START, "calc_sr")
+graph.add_edge(START, "calc_bp")
+graph.add_edge(START, "calc_bpb")
+
+# All three go to summary
+graph.add_edge("calc_sr", "summary")
+graph.add_edge("calc_bp", "summary")
+graph.add_edge("calc_bpb", "summary")
+
+graph.add_edge("summary", END)
+
+workflow = graph.compile()
+```
+
+### Step 4: Run
+
+```python
+initial = {"runs": 100, "balls": 50, "fours": 6, "sixes": 4,
+           "strike_rate": 0.0, "boundary_percent": 0.0,
+           "balls_per_boundary": 0.0, "summary": ""}
+final = workflow.invoke(initial)
+print(final["summary"])
+```
+
+**Output:**
+```
+Strike Rate: 200.0
+Boundary %: 48.0
+Balls per Boundary: 5.0
+```
+
+---
+
+## 2. The Parallel Update Error (and Why Partial Updates Fix It)
+
+### What happens if you return the full state?
+
+```python
+# Wrong approach for parallel nodes
+def calculate_strike_rate_wrong(state):
+    sr = (state["runs"] / state["balls"]) * 100
+    state["strike_rate"] = sr
+    return state   # returns ALL fields
+```
+
+When three such nodes run in parallel, each returns the **entire state** (including `runs`, `balls`, etc.). LangGraph sees three conflicting updates to the same keys (e.g., `runs`) and throws:
+
+```
+InvalidUpdateError: At key 'runs' can receive only one value per step
+```
+
+### Why partial updates work
+
+By returning **only the keys you changed**, you tell LangGraph: “I only modified these fields; leave the others as they are.” LangGraph merges the partial updates from parallel nodes without conflict.
+
+```python
+# Correct: return only the new field
+return {"strike_rate": sr}
+```
+
+**Best practice:** Always use partial updates – they work in sequential workflows too.
+
+---
+
+## 3. Second Example: LLM‑Based Parallel Essay Evaluation
+
+**Goal:** Evaluate a UPSC essay on three aspects in parallel:
+- Clarity of thought
+- Depth of analysis
+- Language quality
+
+Each evaluation produces:
+- A textual **feedback**
+- A **score** (0‑10)
+
+All three run simultaneously, then a final node aggregates the results.
+
+### Graph Structure (same parallel pattern)
+
+```
+START ──┬──> evaluate_clarity ──┐
+        ├──> evaluate_depth ────┼──> aggregate_results ──> END
+        └──> evaluate_language ─┘
+```
+
+### Step 1: Define State
+
+```python
+class EssayState(TypedDict):
+    essay: str
+    clarity_feedback: str
+    clarity_score: float
+    depth_feedback: str
+    depth_score: float
+    language_feedback: str
+    language_score: float
+    final_report: str
+```
+
+### Step 2: Define Nodes (each calls LLM)
+
+```python
+from langchain_openai import ChatOpenAI
+model = ChatOpenAI(model="gpt-4")
+
+def evaluate_clarity(state: EssayState):
+    prompt = f"Evaluate clarity of thought in this essay (0-10). Return JSON: {{'score': int, 'feedback': 'text'}}\nEssay: {state['essay']}"
+    response = model.invoke(prompt)
+    # Parse response (simplified)
+    import json
+    data = json.loads(response.content)
+    return {"clarity_score": data["score"], "clarity_feedback": data["feedback"]}
+
+def evaluate_depth(state: EssayState):
+    prompt = f"Evaluate depth of analysis in this essay (0-10). Return JSON...\nEssay: {state['essay']}"
+    response = model.invoke(prompt)
+    data = json.loads(response.content)
+    return {"depth_score": data["score"], "depth_feedback": data["feedback"]}
+
+def evaluate_language(state: EssayState):
+    prompt = f"Evaluate language quality in this essay (0-10). Return JSON...\nEssay: {state['essay']}"
+    response = model.invoke(prompt)
+    data = json.loads(response.content)
+    return {"language_score": data["score"], "language_feedback": data["feedback"]}
+
+def aggregate_results(state: EssayState):
+    report = f"""
+    CLARITY: {state['clarity_score']}/10 - {state['clarity_feedback']}
+    DEPTH: {state['depth_score']}/10 - {state['depth_feedback']}
+    LANGUAGE: {state['language_score']}/10 - {state['language_feedback']}
+    """
+    return {"final_report": report}
+```
+
+### Step 3: Build Graph
+
+```python
+graph = StateGraph(EssayState)
+graph.add_node("clarity", evaluate_clarity)
+graph.add_node("depth", evaluate_depth)
+graph.add_node("language", evaluate_language)
+graph.add_node("aggregate", aggregate_results)
+
+# Parallel edges
+graph.add_edge(START, "clarity")
+graph.add_edge(START, "depth")
+graph.add_edge(START, "language")
+
+# All go to aggregate
+graph.add_edge("clarity", "aggregate")
+graph.add_edge("depth", "aggregate")
+graph.add_edge("language", "aggregate")
+graph.add_edge("aggregate", END)
+
+workflow = graph.compile()
+```
+
+### Step 4: Run
+
+```python
+initial = {"essay": "Democracy in India has evolved...", 
+           "clarity_feedback": "", "clarity_score": 0.0,
+           "depth_feedback": "", "depth_score": 0.0,
+           "language_feedback": "", "language_score": 0.0,
+           "final_report": ""}
+final = workflow.invoke(initial)
+print(final["final_report"])
+```
+
+---
+
+## 4. Summary: Parallel Workflow Patterns
+
+| Aspect | Sequential (previous video) | Parallel (this video) |
+|--------|----------------------------|----------------------|
+| **Edges** | Single chain START→A→B→END | Multiple edges from START to different nodes |
+| **Node return** | Full state or partial (both work) | **Must use partial updates** (only changed keys) |
+| **Use case** | Step‑by‑step pipeline | Independent calculations on same input |
+| **Example** | Topic → outline → blog | Strike rate + boundary% + balls/boundary |
+
+---
+
+## 5. Key Takeaways
+
+- **Parallel execution** is achieved by adding multiple edges from the same source node (usually `START`).
+- **Always return partial state updates** in parallel nodes – a dictionary containing only the fields you modified.
+- LangGraph automatically merges partial updates from parallel nodes.
+- Parallel workflows are ideal for **independent evaluations** (like essay scoring) or **multiple metrics** from the same data.
+- The same parallel pattern can be used with or without LLMs.
+
+---
+
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
