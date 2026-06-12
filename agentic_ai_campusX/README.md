@@ -4084,4 +4084,234 @@ LangGraph detects that the `individual_scores` field has a reducer. When multipl
 
 ## 08. Conditional Workflows in LangGraph (47:37)
 
+This part of tutorial introduces **conditional workflows** – the third type of workflow after sequential and parallel. Conditional workflows are like **if‑else statements** for graphs: based on a condition, you choose **only one** of several possible paths to execute, not all of them simultaneously.  
+
+The instructor builds a **quadratic equation solver** as a non‑LLM example to demonstrate conditional branching, then mentions a follow‑up LLM‑based customer support example.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Conditional workflow** | A graph where, after a node, the next node is chosen dynamically based on a condition (like `if‑elif‑else`). Only one branch executes. |
+| 2 | **Router function** | A Python function that takes the current `state` and **returns the name of the next node** as a string. |
+| 3 | **`add_conditional_edges`** | LangGraph method that adds conditional edges from a source node. It takes: source node, router function, and (optionally) a mapping of return values to node names. |
+| 4 | **No parallel execution** | Unlike parallel workflows, conditional workflows execute **only one branch** per run. |
+| 5 | **Quadratic equation solver** | A perfect real‑world example because the discriminant determines three distinct cases (two real roots, one repeated root, no real roots). |
+
+---
+
+## 1. Recap of Previous Workflow Types
+
+- **Sequential** – linear chain (A → B → C).  
+- **Parallel** – multiple branches execute simultaneously (A → B and A → C at the same time).  
+- **Conditional** – multiple branches are available, but only **one** is chosen based on a condition (A → (if condition) B else C).
+
+---
+
+## 2. Quadratic Equation Solver – A Conditional Workflow
+
+### Mathematical Background
+
+For a quadratic equation: `ax² + bx + c = 0`
+
+- **Discriminant** `D = b² - 4ac`
+- If `D > 0` → two distinct real roots  
+  `root1 = (-b + sqrt(D)) / (2a)`  
+  `root2 = (-b - sqrt(D)) / (2a)`
+- If `D == 0` → one repeated real root  
+  `root = -b / (2a)`
+- If `D < 0` → no real roots
+
+We will build a graph that:
+1. **Displays the equation** (show a, b, c).
+2. **Calculates discriminant**.
+3. **Branches conditionally** to the appropriate root‑calculation node.
+4. **Returns the result**.
+
+### Graph Structure
+
+```
+START → show_equation → calculate_discriminant
+                              |
+                              ↓ (router based on D)
+                ┌─────────────┼─────────────┐
+                ↓             ↓             ↓
+          real_roots   repeated_root   no_real_roots
+                ↓             ↓             ↓
+                └─────────────┴─────────────┘
+                              ↓
+                             END
+```
+
+---
+
+## 3. Step‑by‑Step Code Example
+
+### 3.1 Imports and State Definition
+
+```python
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class QuadState(TypedDict):
+    a: float
+    b: float
+    c: float
+    equation: str
+    discriminant: float
+    result: str
+```
+
+### 3.2 Node Functions
+
+#### Node 1: Show the equation
+
+```python
+def show_equation(state: QuadState) -> dict:
+    eq = f"{state['a']}x² + {state['b']}x + {state['c']}"
+    return {"equation": eq}
+```
+
+#### Node 2: Calculate discriminant
+
+```python
+def calculate_discriminant(state: QuadState) -> dict:
+    d = (state['b'] ** 2) - (4 * state['a'] * state['c'])
+    return {"discriminant": d}
+```
+
+#### Node 3: Two real roots
+
+```python
+import math
+
+def real_roots(state: QuadState) -> dict:
+    a, b, d = state['a'], state['b'], state['discriminant']
+    root1 = (-b + math.sqrt(d)) / (2 * a)
+    root2 = (-b - math.sqrt(d)) / (2 * a)
+    result = f"Two real roots: {root1:.2f} and {root2:.2f}"
+    return {"result": result}
+```
+
+#### Node 4: One repeated root
+
+```python
+def repeated_root(state: QuadState) -> dict:
+    a, b = state['a'], state['b']
+    root = -b / (2 * a)
+    result = f"One repeated root: {root:.2f}"
+    return {"result": result}
+```
+
+#### Node 5: No real roots
+
+```python
+def no_real_roots(state: QuadState) -> dict:
+    result = "No real roots (discriminant < 0)"
+    return {"result": result}
+```
+
+### 3.3 Router Function (Condition)
+
+```python
+def route_condition(state: QuadState) -> str:
+    d = state["discriminant"]
+    if d > 0:
+        return "real_roots"
+    elif d == 0:
+        return "repeated_root"
+    else:
+        return "no_real_roots"
+```
+
+**Important:** This function returns the **name of the next node** as a string, not the node object.
+
+### 3.4 Building the Graph with Conditional Edges
+
+```python
+# Create graph
+graph = StateGraph(QuadState)
+
+# Add all nodes
+graph.add_node("show_equation", show_equation)
+graph.add_node("calculate_discriminant", calculate_discriminant)
+graph.add_node("real_roots", real_roots)
+graph.add_node("repeated_root", repeated_root)
+graph.add_node("no_real_roots", no_real_roots)
+
+# Sequential edges (unconditional)
+graph.add_edge(START, "show_equation")
+graph.add_edge("show_equation", "calculate_discriminant")
+
+# Conditional edges from calculate_discriminant
+graph.add_conditional_edges(
+    "calculate_discriminant",          # source node
+    route_condition,                   # router function
+    {
+        "real_roots": "real_roots",
+        "repeated_root": "repeated_root",
+        "no_real_roots": "no_real_roots"
+    }
+)
+
+# All three result nodes go to END
+graph.add_edge("real_roots", END)
+graph.add_edge("repeated_root", END)
+graph.add_edge("no_real_roots", END)
+
+# Compile
+workflow = graph.compile()
+```
+
+### 3.5 Running the Workflow
+
+```python
+# Case 1: D > 0 (a=4, b=-5, c=-4)
+initial_state = {"a": 4, "b": -5, "c": -4, "equation": "", "discriminant": 0.0, "result": ""}
+final = workflow.invoke(initial_state)
+print(final["equation"])      # 4x² + -5x + -4
+print(final["discriminant"])  # 89.0
+print(final["result"])        # Two real roots: 1.56 and -0.56
+
+# Case 2: D == 0 (a=1, b=2, c=1)
+initial_state2 = {"a": 1, "b": 2, "c": 1, ...}
+final2 = workflow.invoke(initial_state2)
+print(final2["result"])       # One repeated root: -1.00
+
+# Case 3: D < 0 (a=1, b=2, c=5)
+initial_state3 = {"a": 1, "b": 2, "c": 5, ...}
+final3 = workflow.invoke(initial_state3)
+print(final3["result"])       # No real roots (discriminant < 0)
+```
+
+---
+
+## 4. Visualising the Conditional Graph
+
+When you visualise the compiled graph, conditional edges are shown as **dotted lines** – meaning only one of them will be taken per run.
+
+```python
+from IPython.display import Image, display
+display(Image(workflow.get_graph().draw_mermaid_png()))
+```
+
+You will see:  
+`START → show_equation → calculate_discriminant`  
+Then three dotted arrows to `real_roots`, `repeated_root`, `no_real_roots`.  
+Finally, solid arrows from each to `END`.
+
+---
+
+## 5. Key Takeaways
+
+- **`add_conditional_edges`** replaces `add_edge` when the next node depends on a runtime condition.
+- The **router function** must return a string matching one of the node names.
+- The optional third argument (a dictionary) maps return values to node names – useful when the router returns codes like `"case1"` instead of the actual node name.
+- Conditional workflows are **deterministic** for a given input – only one path is taken.
+- This pattern is essential for building **agentic behaviour**, where the LLM decides which tool or sub‑graph to call next (will be covered in later videos).
+
+---
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
