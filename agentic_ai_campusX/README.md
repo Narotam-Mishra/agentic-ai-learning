@@ -4314,4 +4314,266 @@ Finally, solid arrows from each to `END`.
 
 ---
 
+## Customer Review Handler
+
+This part tutorial builds a **real‑world conditional workflow** using LangGraph: a customer review response system.  
+The workflow:
+
+1. Takes a customer **review** (text).
+2. Uses an LLM to classify **sentiment** (positive / negative) – structured output.
+3. **Conditionally branches**:
+   - If **positive** → generates a warm thank‑you message.
+   - If **negative** → runs a **diagnosis** (extracts issue type, tone, urgency) → then generates an empathetic resolution message.
+4. Outputs the final response.
+
+This demonstrates **conditional edges** – the graph chooses exactly one path based on the sentiment.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Sentiment classification** | First LLM call decides if review is positive or negative (structured output: `{"sentiment": "positive" or "negative"}`). |
+| 2 | **Conditional branch** | Based on the sentiment, the graph routes to either a positive response node or a diagnosis node. |
+| 3 | **Diagnosis** | For negative reviews, a second structured LLM call extracts `issue_type`, `tone`, `urgency`. |
+| 4 | **Response generation** | Two different LLM calls generate the final reply: one for positive, one for negative (using the diagnosis data). |
+| 5 | **State definition** | Contains `review`, `sentiment`, `diagnosis` (dict), and `response`. |
+| 6 | **Two structured schemas** | `SentimentSchema` (one field) and `DiagnosisSchema` (three fields). |
+| 7 | **Router function** | `check_sentiment(state)` returns `"positive_response"` or `"run_diagnosis"` – the name of the next node. |
+| 8 | **`add_conditional_edges`** | Links the sentiment node to the router function; only one outgoing edge is taken per run. |
+
+---
+
+## 1. Workflow Diagram
+
+```
+START → find_sentiment
+              ↓
+        (router based on sentiment)
+         ↙         ↘
+ positive_response   run_diagnosis
+        ↓                  ↓
+        END          negative_response
+                           ↓
+                          END
+```
+
+---
+
+## 2. State Definition
+
+The state holds all data that flows through the graph.
+
+```python
+from typing import TypedDict, Dict
+
+class ReviewState(TypedDict):
+    review: str
+    sentiment: str          # "positive" or "negative"
+    diagnosis: Dict[str, str]  # {issue_type, tone, urgency}
+    response: str
+```
+
+---
+
+## 3. Structured Output Schemas (Pydantic)
+
+We need **two schemas** – one for sentiment, one for diagnosis.
+
+### Sentiment Schema
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class SentimentSchema(BaseModel):
+    sentiment: Literal["positive", "negative"] = Field(description="Sentiment of the review")
+```
+
+### Diagnosis Schema
+
+```python
+class DiagnosisSchema(BaseModel):
+    issue_type: Literal["ui", "performance", "bug", "support", "other"] = Field(description="Category of the issue")
+    tone: Literal["frustrated", "angry", "disappointed", "neutral"] = Field(description="Emotional tone of the user")
+    urgency: Literal["low", "medium", "high"] = Field(description="How urgent the issue appears")
+```
+
+---
+
+## 4. Creating Structured LLM Models
+
+```python
+from langchain_openai import ChatOpenAI
+
+model = ChatOpenAI(model="gpt-4o-mini")
+
+# Model for sentiment
+sentiment_model = model.with_structured_output(SentimentSchema)
+
+# Model for diagnosis
+diagnosis_model = model.with_structured_output(DiagnosisSchema)
+```
+
+We also keep a **normal (unstructured) model** for generating free‑text responses.
+
+---
+
+## 5. Node Functions
+
+### Node 1: Find Sentiment
+
+```python
+def find_sentiment(state: ReviewState) -> dict:
+    prompt = f"What is the sentiment of this review? {state['review']}"
+    result = sentiment_model.invoke(prompt)
+    return {"sentiment": result.sentiment}
+```
+
+### Node 2: Positive Response (generates thank‑you message)
+
+```python
+def positive_response(state: ReviewState) -> dict:
+    prompt = f"Write a warm thank-you message in response to this review: {state['review']}. Also kindly ask the user to leave feedback on our website."
+    response = model.invoke(prompt)
+    return {"response": response.content}
+```
+
+### Node 3: Run Diagnosis (structured extraction)
+
+```python
+def run_diagnosis(state: ReviewState) -> dict:
+    prompt = f"Diagnose this negative review. Return issue type, tone, and urgency. Review: {state['review']}"
+    result = diagnosis_model.invoke(prompt)
+    # Convert Pydantic model to dict
+    return {"diagnosis": result.model_dump()}
+```
+
+### Node 4: Negative Response (empathetic resolution)
+
+```python
+def negative_response(state: ReviewState) -> dict:
+    diagnosis = state["diagnosis"]
+    prompt = f"""
+    You are a support assistant. The user had an issue: {diagnosis['issue_type']}.
+    Their tone was: {diagnosis['tone']}. Urgency: {diagnosis['urgency']}.
+    Write an empathetic, helpful resolution message.
+    """
+    response = model.invoke(prompt)
+    return {"response": response.content}
+```
+
+---
+
+## 6. Router Function (Condition)
+
+```python
+def check_sentiment(state: ReviewState) -> str:
+    if state["sentiment"] == "positive":
+        return "positive_response"
+    else:
+        return "run_diagnosis"
+```
+
+**Returns the name of the next node** as a string.
+
+---
+
+## 7. Building the Graph with Conditional Edges
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+graph = StateGraph(ReviewState)
+
+# Add nodes
+graph.add_node("find_sentiment", find_sentiment)
+graph.add_node("positive_response", positive_response)
+graph.add_node("run_diagnosis", run_diagnosis)
+graph.add_node("negative_response", negative_response)
+
+# Sequential edges
+graph.add_edge(START, "find_sentiment")
+
+# Conditional edge from find_sentiment
+graph.add_conditional_edges(
+    "find_sentiment",           # source node
+    check_sentiment,            # router function
+    {
+        "positive_response": "positive_response",
+        "run_diagnosis": "run_diagnosis"
+    }
+)
+
+# Edges from the two branches
+graph.add_edge("positive_response", END)
+graph.add_edge("run_diagnosis", "negative_response")
+graph.add_edge("negative_response", END)
+
+workflow = graph.compile()
+```
+
+---
+
+## 8. Running the Workflow
+
+### Example 1: Positive Review
+
+```python
+initial = {
+    "review": "I've been using this app for a month. The UI is incredibly clean and intuitive. Great job!",
+    "sentiment": "",
+    "diagnosis": {},
+    "response": ""
+}
+final = workflow.invoke(initial)
+print(final["response"])
+```
+
+**Output (sample):**  
+*"Thank you for your kind words! We're thrilled you enjoy the app. Please consider leaving a review on our website!"*
+
+### Example 2: Negative Review
+
+```python
+initial = {
+    "review": "I've been trying to log in for over an hour. The app keeps freezing on the authentication screen. This bug is unacceptable.",
+    "sentiment": "",
+    "diagnosis": {},
+    "response": ""
+}
+final = workflow.invoke(initial)
+print(final["diagnosis"])   # {'issue_type': 'bug', 'tone': 'frustrated', 'urgency': 'high'}
+print(final["response"])
+```
+
+**Output (sample):**  
+*"We're really sorry you're experiencing login issues. Our team is investigating the bug you reported. Please contact support at help@example.com so we can resolve this urgently."*
+
+---
+
+## 9. Key Takeaways
+
+- **Conditional workflows** are implemented using `add_conditional_edges` + a router function that returns the **next node name**.
+- The router function can use any logic – here it simply checks the `sentiment` field from the state.
+- Structured output (Pydantic) ensures reliable parsing of sentiment and diagnosis data.
+- Multiple structured models can be used for different tasks (sentiment, diagnosis).
+- The final response uses **unstructured** LLM calls to generate natural, empathetic language.
+
+---
+
+## 10. Comparison: Conditional vs Parallel Workflows
+
+| Feature | Conditional Workflow | Parallel Workflow |
+|---------|----------------------|--------------------|
+| **Edges** | `add_conditional_edges` | multiple `add_edge` from same source |
+| **Execution** | Only one branch runs | All branches run simultaneously |
+| **Router needed?** | Yes – returns node name | No – all edges are taken |
+| **Use case** | If‑else decision | Independent calculations |
+
+---
+
+## 09. Iterative Workflows in LangGraph (37:13)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples

@@ -1,15 +1,12 @@
 
 # qudratic equation example using conditional workflow 
 
-from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI
 from typing import TypedDict, Literal
 from IPython.display import Image, display
 from pathlib import Path
 
-
-load_dotenv(override=True)
 
 class QuadState(TypedDict):
     a: int
