@@ -4821,4 +4821,306 @@ print("All feedback received:", result["feedback_history"])
 
 ## 010. How to build a Chatbot using LangGraph (36:37)
 
+## Building a Chatbot with LangGraph – State, Memory & Persistence
+
+This tutorial is the **first part** of a multi‑video series building a **production‑grade chatbot** using LangGraph.  
+It covers:
+
+1. **Design of a simple chatbot** (single‑node sequential workflow).
+2. **State definition** – storing conversation history as a list of messages with a special reducer (`add_messages`).
+3. **Building and compiling** the graph.
+4. **Implementing a multi‑turn conversation loop** (while loop with user input).
+5. **The core problem** – without persistence, each invocation starts from scratch → no memory of past messages.
+6. **The solution** – using a **checkpointer** (`MemorySaver`) to persist state across invocations.
+7. **Threading concept** – separating different conversation sessions via `thread_id`.
+8. **How it works** – state is saved after each graph run and restored for the next run.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Chatbot as a workflow** | A simple sequential graph with a single node that calls an LLM. |
+| 2 | **State design** | Must store the whole conversation history – a list of `BaseMessage` objects. |
+| 3 | **Special reducer `add_messages`** | Built‑in LangGraph reducer that appends new messages to the list instead of replacing them. Essential for preserving history. |
+| 4 | **Graph structure** | `START → chat_node → END` |
+| 5 | **Multi‑turn loop** | A `while True` loop that collects user input, invokes the graph with the latest message, prints the AI response, and exits on keywords like `exit`, `quit`, `bye`. |
+| 6 | **The memory problem** | Each `invoke()` creates a fresh state unless persistence is enabled. The loop calls `invoke()` repeatedly, so previous messages are lost. |
+| 7 | **Persistence with checkpoints** | A **checkpointer** saves the state after each graph execution. The next invocation can resume from that saved state. |
+| 8 | **`MemorySaver`** | An in‑memory checkpointer (stores state in RAM). Suitable for development; production uses database‑based checkpoints. |
+| 9 | **`thread_id`** | A unique identifier for a conversation session. Different users (or different chats) have different `thread_id`. |
+| 10 | **`config`** | A dictionary passed to `invoke()` containing `{"configurable": {"thread_id": "some_id"}}`. Tells LangGraph which persisted state to load. |
+| 11 | **How persistence works** | After each graph run, the checkpointer saves the final state keyed by `thread_id`. On next invoke with the same `thread_id`, LangGraph loads that state before execution. |
+
+---
+
+## 1. Simple Chatbot Design
+
+The chatbot is a **sequential workflow** with **only one node**:
+
+```
+START → chat_node → END
+```
+
+- The user sends a message.
+- The `chat_node` calls an LLM with the entire conversation history.
+- The LLM generates a response.
+- The response is added to the history.
+
+**Key insight:** The conversation history must be stored in the **state** and passed to the LLM each time.
+
+---
+
+## 2. State Definition with `add_messages` Reducer
+
+We define a `ChatState` with a single field `messages`.  
+We use `Annotated` with LangGraph’s built‑in `add_messages` reducer – it **appends** new messages to the list instead of replacing them.
+
+```python
+from typing import Annotated, List
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from typing import TypedDict
+
+class ChatState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+```
+
+**Why `add_messages`?**  
+Without a reducer, assigning a new list would replace the old history. `add_messages` merges the new messages into the existing list, preserving the full conversation.
+
+---
+
+## 3. Building the Graph
+
+### 3.1 Import required components
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+```
+
+### 3.2 Define the LLM and the chat node
+
+```python
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+def chat_node(state: ChatState) -> dict:
+    # The state already contains all previous messages.
+    # Invoke the LLM with the whole message list.
+    response = llm.invoke(state["messages"])
+    # Return the new message as a list – `add_messages` will append it.
+    return {"messages": [response]}
+```
+
+### 3.3 Build the graph
+
+```python
+graph = StateGraph(ChatState)
+graph.add_node("chat_node", chat_node)
+graph.add_edge(START, "chat_node")
+graph.add_edge("chat_node", END)
+```
+
+### 3.4 Compile (without persistence – will lose memory)
+
+```python
+chatbot = graph.compile()
+```
+
+---
+
+## 4. Multi‑Turn Conversation Loop (No Persistence – Broken)
+
+This loop asks the user for input, invokes the graph, prints the AI’s response, and repeats until the user types `exit`/`quit`/`bye`.
+
+```python
+while True:
+    user_input = input("You: ")
+    if user_input.strip().lower() in ["exit", "quit", "bye"]:
+        print("Goodbye!")
+        break
+
+    # Invoke the graph with the new message only (old history is lost!)
+    initial_state = {"messages": [HumanMessage(content=user_input)]}
+    final_state = chatbot.invoke(initial_state)
+    
+    # Extract the last AI message
+    ai_message = final_state["messages"][-1]
+    print(f"AI: {ai_message.content}")
+```
+
+**The problem:** Each `invoke()` starts with a **fresh state** containing only the current user message. Previous messages are **not** included. Therefore, the LLM has no memory of earlier turns → it cannot answer “What’s my name?” after being told earlier.
+
+---
+
+## 5. The Solution: Persistence (Checkpoints)
+
+LangGraph allows you to add a **checkpointer** that saves the state after every superstep.  
+When you invoke the graph again with the same `thread_id`, it **loads the saved state** automatically.
+
+### 5.1 Import `MemorySaver`
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+```
+
+### 5.2 Create a checkpointer and compile the graph with it
+
+```python
+checkpointer = MemorySaver()   # stores state in RAM
+graph = StateGraph(ChatState)
+graph.add_node("chat_node", chat_node)
+graph.add_edge(START, "chat_node")
+graph.add_edge("chat_node", END)
+
+chatbot = graph.compile(checkpointer=checkpointer)
+```
+
+### 5.3 Define a `thread_id` and a `config`
+
+A **thread** represents one conversation session (e.g., one user, one chat). All invocations with the same `thread_id` share the persisted state.
+
+```python
+thread_id = "user_nitish"
+config = {"configurable": {"thread_id": thread_id}}
+```
+
+### 5.4 Modified loop – pass `config` to each invoke
+
+Now we pass the **same config** every time. The first invoke starts with an empty state; subsequent invokes load the previous state.
+
+```python
+while True:
+    user_input = input("You: ")
+    if user_input.strip().lower() in ["exit", "quit", "bye"]:
+        print("Goodbye!")
+        break
+
+    # Prepare input – only the new user message; old history comes from checkpoint
+    input_state = {"messages": [HumanMessage(content=user_input)]}
+    final_state = chatbot.invoke(input_state, config=config)
+    
+    ai_message = final_state["messages"][-1]
+    print(f"AI: {ai_message.content}")
+```
+
+**Now the bot remembers!**  
+- First turn: user says “My name is Nitish”. Bot responds “Hello Nitish”.  
+- Second turn: user asks “What is my name?”. The state loaded from checkpoint contains the previous messages, so the bot can answer correctly.
+
+---
+
+## 6. How Persistence Works Under the Hood
+
+| Step | What happens |
+|------|--------------|
+| 1 | First `invoke()` with `config` – no saved state for this `thread_id`. Initial state is used. |
+| 2 | Graph runs: `chat_node` reads `state["messages"]`, calls LLM, returns updated state. |
+| 3 | After execution, the checkpointer **saves the final state** in memory (RAM) using `thread_id` as the key. |
+| 4 | Second `invoke()` with same `config` – checkpointer loads the saved state, adds the new user message (via `add_messages`), then runs the graph. |
+| 5 | The new final state is saved again, overwriting/updating the previous one. |
+| 6 | This continues for every turn. |
+
+Because we used `add_messages`, messages are appended, not replaced, so the complete conversation history accumulates.
+
+---
+
+## 7. Inspecting the Saved State
+
+You can retrieve the full state for a thread at any time:
+
+```python
+saved_state = chatbot.get_state(config)
+print(saved_state.values["messages"])
+```
+
+This prints all messages exchanged so far.
+
+---
+
+## 8. Limitations of `MemorySaver`
+
+- **In‑memory only** – if the Python process restarts, all saved states are lost.
+- **Not suitable for production** – real chatbots use a database checkpointer (e.g., `PostgresSaver`, `RedisSaver`) to persist state across server restarts.
+
+The next video will cover:
+- Database‑based persistence.
+- Checkpointers in depth.
+- Fault tolerance (resuming after crash).
+- Human‑in‑the‑loop (interrupting and resuming).
+
+---
+
+## 9. Complete Working Code Example (With Persistence)
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from typing import Annotated, List, TypedDict
+from langchain_core.messages import HumanMessage, BaseMessage
+
+# 1. State definition with add_messages reducer
+class ChatState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+
+# 2. LLM and node function
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+def chat_node(state: ChatState) -> dict:
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+# 3. Build graph with checkpointer
+graph = StateGraph(ChatState)
+graph.add_node("chat_node", chat_node)
+graph.add_edge(START, "chat_node")
+graph.add_edge("chat_node", END)
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# 4. Conversation loop with persistence
+thread_id = "my_chat_session"
+config = {"configurable": {"thread_id": thread_id}}
+
+print("Chatbot ready. Type 'exit' to quit.")
+while True:
+    user_input = input("You: ")
+    if user_input.strip().lower() in ["exit", "quit", "bye"]:
+        print("Goodbye!")
+        break
+
+    input_state = {"messages": [HumanMessage(content=user_input)]}
+    final_state = chatbot.invoke(input_state, config=config)
+    ai_message = final_state["messages"][-1]
+    print(f"AI: {ai_message.content}")
+
+# Optional: inspect full history
+print("\n--- Full conversation history ---")
+for msg in chatbot.get_state(config).values["messages"]:
+    print(f"{msg.type}: {msg.content}")
+```
+
+---
+
+## 10. Key Takeaways
+
+- A chatbot is just a **sequential workflow** with one node that calls an LLM.
+- The **state** must hold the entire conversation history.
+- Use **`add_messages`** as a reducer to append new messages instead of overwriting.
+- Without persistence, each `invoke()` starts fresh – the bot has **no memory**.
+- **Checkpointers** save the state after each graph run.
+- **`thread_id`** in the `config` tells LangGraph which saved state to load.
+- **`MemorySaver`** stores state in RAM (development only). Production needs a database.
+- This pattern is the foundation for more advanced features: human‑in‑the‑loop, fault tolerance, and multi‑user sessions.
+
+---
+
+## 011. Persistence in LangGraph (58:13)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
