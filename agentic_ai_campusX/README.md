@@ -5648,4 +5648,223 @@ The next videos will build on persistence to implement:
 
 ---
 
+## Human‑in‑the‑Loop, Time Travel & Advanced Persistence (contd...)
+
+This final part of the persistence tutorial explains **two advanced features** built on top of persistence:
+
+1. **Human‑in‑the‑Loop (HITL)** – pausing a workflow to ask for human input (approval, decision), then resuming later.
+2. **Time Travel** – replaying a workflow from any previous checkpoint, modifying state, and creating new branches for debugging or experimentation.
+
+Both features rely entirely on **checkpointing** (persistence). The video also summarises the four benefits of persistence: short‑term memory, fault tolerance, HITL, and time travel.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Human‑in‑the‑Loop (HITL)** | A workflow is intentionally interrupted to wait for a human decision (e.g., approve a post). |
+| 2 | **Why persistence is required** | Human input may take hours/days. The workflow must be **saved** (checkpointed) and later **resumed** from the exact point. |
+| 3 | **Interrupt** | LangGraph can pause execution at a node and wait for external input. The state is saved in a checkpoint. |
+| 4 | **Resume** | When human input arrives, call `invoke(None, config)` with the same thread ID – LangGraph loads the checkpoint and continues. |
+| 5 | **Time Travel** | Going back to any previous checkpoint (using its `checkpoint_id`) and re‑executing the remaining nodes. |
+| 6 | **Checkpoint ID** | Every checkpoint has a unique identifier. You can retrieve it from `get_state_history()`. |
+| 7 | **Replay** | Calling `invoke(None, config, checkpoint_id=id)` re‑runs the workflow from that checkpoint. |
+| 8 | **Update state** | You can modify the state at a checkpoint using `update_state(config, new_values, checkpoint_id)`. This creates a new branch in the execution history. |
+| 9 | **Branching** | Each time you replay or update state, a new “branch” is created – the original execution remains untouched. |
+| 10 | **Primary use cases** | HITL for approvals, time travel for debugging and experimentation. |
+
+---
+
+## 1. Human‑in‑the‑Loop (HITL)
+
+### The Problem
+
+Imagine a workflow that:
+1. Generates a LinkedIn post from a topic.
+2. Posts it to LinkedIn via API.
+
+You want to **ask the human for approval** before posting. The human may respond in seconds, hours, or days.  
+You cannot keep the workflow running in memory for that long (it would waste resources and risk crashes).
+
+### The Solution: Persistence + Interrupt
+
+- LangGraph **saves a checkpoint** right before the human approval step.
+- It **interrupts** execution (stops without finishing).
+- The state is persisted (in database or memory).
+- Later, when human input arrives, you call `invoke(None, config=config)` – LangGraph loads the checkpoint and resumes exactly where it stopped.
+
+**Conceptual diagram:**
+
+```
+START → generate_post → [HUMAN APPROVAL] → post_to_LinkedIn → END
+                          ↑                     
+                    (interrupt, save state)     
+                    wait for human input...    
+                    then resume                 
+```
+
+**Note:** The video does not show the actual code for HITL, but states that it will be covered in a dedicated video. The key takeaway is that **persistence is the foundation** – without it, HITL would be impossible for long delays.
+
+---
+
+## 2. Time Travel – Replaying and Branching
+
+Time travel allows you to:
+- Go back to any checkpoint (using its `checkpoint_id`).
+- Re‑run the workflow from that point (replay).
+- **Modify the state** at a checkpoint and then re‑run (creating a new branch).
+
+### Example: Joke Generation Workflow
+
+Workflow: `START → generate_joke → generate_explanation → END`
+
+We already ran it with `topic = "pizza"`. Now we want to:
+1. Go back to the checkpoint **before the joke was generated** (where only `topic` exists).
+2. Replay from there (generating a new joke and explanation).
+
+### Step 1: Get the checkpoint history
+
+```python
+for checkpoint in workflow.get_state_history(config):
+    print(checkpoint.values, checkpoint.next)
+```
+
+**Output (conceptual):**
+
+| Checkpoint ID | State | Next node |
+|---------------|-------|-----------|
+| `ckpt_1` | `{}` | `START` |
+| `ckpt_2` | `{"topic": "pizza"}` | `"generate_joke"` |
+| `ckpt_3` | `{"topic": "pizza", "joke": "..."}` | `"generate_explanation"` |
+| `ckpt_4` | full state | `None` |
+
+### Step 2: Replay from a specific checkpoint
+
+```python
+# Copy the checkpoint_id from history (e.g., ckpt_2)
+replay_config = {"configurable": {"thread_id": "pizza_session", "checkpoint_id": "ckpt_2"}}
+new_result = workflow.invoke(None, config=replay_config)
+```
+
+**What happens:** LangGraph loads the state `{"topic": "pizza"}` and re‑executes `generate_joke` and `generate_explanation`. The new joke may be different (LLM is probabilistic). The original execution is **preserved** – a new branch is created.
+
+### Step 3: Update state at a checkpoint
+
+You can also modify the state before replaying – e.g., change `topic` from `"pizza"` to `"samosa"`.
+
+```python
+from langgraph.checkpoint import Checkpoint
+
+# Get the checkpoint_id where topic is "pizza"
+old_checkpoint_id = "ckpt_2"
+
+# Update the state
+workflow.update_state(
+    config={"configurable": {"thread_id": "pizza_session"}},
+    values={"topic": "samosa"},
+    checkpoint_id=old_checkpoint_id
+)
+```
+
+Now a **new checkpoint** is created with the updated state. You can then replay from that new checkpoint.
+
+```python
+# Get the new checkpoint_id (from the branch)
+new_checkpoint_id = ...  # fetch from history
+
+replay_config = {"configurable": {"thread_id": "pizza_session", "checkpoint_id": new_checkpoint_id}}
+new_result = workflow.invoke(None, config=replay_config)
+```
+
+**Result:** A joke about samosa is generated, and the original pizza joke remains untouched. You have created a **branch** in the execution history.
+
+---
+
+## 3. Code Example: Time Travel with Checkpoint IDs
+
+This example assumes you have the joke workflow from the previous video with persistence.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START, END
+
+# Assume JokeState, nodes, graph built with checkpointer
+checkpointer = MemorySaver()
+workflow = graph.compile(checkpointer=checkpointer)
+
+# First run: pizza topic
+config_pizza = {"configurable": {"thread_id": "test_session"}}
+initial = {"topic": "pizza", "joke": "", "explanation": ""}
+workflow.invoke(initial, config=config_pizza)
+
+# Get all checkpoints
+history = list(workflow.get_state_history(config_pizza))
+# Find the checkpoint where topic is set but joke is not yet generated
+target_checkpoint = None
+for ckpt in history:
+    if "topic" in ckpt.values and "joke" not in ckpt.values:
+        target_checkpoint = ckpt
+        break
+
+if target_checkpoint:
+    checkpoint_id = target_checkpoint.config["configurable"]["checkpoint_id"]
+    print(f"Replaying from checkpoint {checkpoint_id}")
+    
+    # Replay without changing state
+    replay_config = {"configurable": {"thread_id": "test_session", "checkpoint_id": checkpoint_id}}
+    new_result = workflow.invoke(None, config=replay_config)
+    print("New joke:", new_result["joke"])
+```
+
+**To update state before replay:**
+
+```python
+# Update topic from pizza to samosa at that checkpoint
+workflow.update_state(
+    config_pizza,
+    {"topic": "samosa"},
+    checkpoint_id=checkpoint_id
+)
+
+# Get the new checkpoint created after update
+new_history = list(workflow.get_state_history(config_pizza))
+updated_checkpoint = new_history[0]  # most recent
+updated_checkpoint_id = updated_checkpoint.config["configurable"]["checkpoint_id"]
+
+# Replay from the updated checkpoint
+replay_config2 = {"configurable": {"thread_id": "test_session", "checkpoint_id": updated_checkpoint_id}}
+samosa_result = workflow.invoke(None, config=replay_config2)
+print("Samosa joke:", samosa_result["joke"])
+```
+
+---
+
+## 4. Four Benefits of Persistence – Summary
+
+| Benefit | Description | Use Case |
+|---------|-------------|----------|
+| **Short‑term memory** | Store conversation history per thread | Chatbots that remember past messages |
+| **Fault tolerance** | Resume workflow after crash | Long‑running workflows (e.g., hiring process) |
+| **Human‑in‑the‑Loop** | Pause for human input, resume later | Approvals, reviews, risk‑sensitive actions |
+| **Time travel** | Replay from any checkpoint, modify state, branch | Debugging, experimentation, “what‑if” scenarios |
+
+All four are made possible because LangGraph saves **every intermediate state** (at each superstep/checkpoint) and allows you to later **restore** any of those states and continue execution.
+
+---
+
+## 5. Key Takeaways
+
+- **Human‑in‑the‑Loop** is implemented by **interrupting** the workflow at a specific node, saving the checkpoint, and later **resuming** with `invoke(None, config)`.
+- **Time travel** uses `checkpoint_id` to go back to any saved state.
+- You can **replay** from a checkpoint (`invoke(None, config_with_checkpoint_id)`).
+- You can **update** the state at a checkpoint (`update_state()`) – this creates a **new branch** in the execution history.
+- Every time you replay or update, a new checkpoint is added; the original history is preserved.
+- These features are **advanced debugging tools** – not needed for simple workflows, but invaluable for complex agentic systems.
+- Persistence (checkpointing) is the **foundation** for all of them. Without checkpoints, HITL and time travel would be impossible.
+
+---
+
+## 012. Building a Chatbot with UI in LangGraph & Streamlit (32:27)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
