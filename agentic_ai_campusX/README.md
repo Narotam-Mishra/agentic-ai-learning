@@ -5867,4 +5867,276 @@ All four are made possible because LangGraph saves **every intermediate state** 
 
 ## 012. Building a Chatbot with UI in LangGraph & Streamlit (32:27)
 
+This part of tutorial shows how to build a **user interface (UI)** for the LangGraph chatbot. The UI is built with **Streamlit**, a Python library for rapid web app development. The chatbot retains **conversation memory** (short‑term memory) across turns, and the UI displays messages in a clean chat format.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Two‑component architecture** | Separate the chatbot into **backend** (LangGraph graph + checkpointer) and **frontend** (Streamlit UI). |
+| 2 | **Backend code** | Exactly the same LangGraph code from the previous video – defines state, graph, nodes, and checkpointer (`MemorySaver`). |
+| 3 | **Frontend code** | Uses Streamlit's `st.chat_message` (for displaying messages) and `st.chat_input` (for user input). |
+| 4 | **Streamlit behaviour** | The script re‑runs from top to bottom on every user interaction. Without persistence, conversation history is lost. |
+| 5 | **`st.session_state`** | A dictionary that **persists across script re‑runs** – used to store the message history list. |
+| 6 | **Message history structure** | A list of dictionaries, each with `role` (`"user"` or `"assistant"`) and `content` (message text). |
+| 7 | **Integration with LangGraph** | Import the compiled `chatbot` object from the backend. Use `chatbot.invoke()` with a `config` containing `thread_id` and a state containing the new user message. |
+| 8 | **Thread ID** | Required because the backend uses a checkpointer. Each conversation (or user) gets a unique `thread_id`. |
+| 9 | **Full workflow** | User types → message appended to session state history → displayed → sent to LangGraph (with full history) → AI response appended → displayed. |
+| 10 | **Code changes** | Only a small part of the frontend needs to be changed – replace the dummy “echo” response with a real LangGraph call. |
+
+---
+
+## 1. Architecture Overview
+
+The chatbot is split into two Python files:
+
+- **`langraph_backend.py`** – contains the LangGraph workflow (state, graph, nodes, checkpointer).  
+  This is the same code as the previous video – a simple single‑node graph that calls an LLM with the full message history.
+
+- **`streamlit_frontend.py`** – contains the Streamlit UI code. It imports the compiled `chatbot` from the backend and uses it to generate responses.
+
+**Flow:**
+```
+User types message in Streamlit UI
+         ↓
+Streamlit script runs (top to bottom)
+         ↓
+Message added to session_state history
+         ↓
+History displayed (all previous messages)
+         ↓
+(If new user input) → call chatbot.invoke() with config + state
+         ↓
+AI response extracted from returned state
+         ↓
+AI response added to session_state history and displayed
+```
+
+---
+
+## 2. Streamlit Basics – Chat Message & Chat Input
+
+Streamlit provides two key components for chat interfaces:
+
+### `st.chat_message(role)`
+
+Creates a chat bubble for a specific role (`"user"` or `"assistant"`). Inside it, you put the message content (e.g., with `st.text()` or `st.write()`).
+
+```python
+import streamlit as st
+
+# Display a user message
+with st.chat_message("user"):
+    st.text("Hi, how are you?")
+
+# Display an assistant message
+with st.chat_message("assistant"):
+    st.text("I'm fine, thank you!")
+```
+
+### `st.chat_input(placeholder)`
+
+Creates an input box at the bottom of the screen where the user can type. It returns the typed text when the user presses Enter.
+
+```python
+user_input = st.chat_input("Type your message here...")
+```
+
+**Important:** When the user presses Enter, the **entire Streamlit script re‑runs**. So any variables defined outside `session_state` are reset.
+
+---
+
+## 3. The Problem – Losing History on Re‑run
+
+In a simple implementation without session state:
+
+```python
+user_input = st.chat_input("Say something")
+if user_input:
+    with st.chat_message("user"):
+        st.text(user_input)
+    with st.chat_message("assistant"):
+        st.text(user_input)   # dummy echo
+```
+
+Each time you send a new message, the script re‑runs and **overwrites** the previous messages – only the latest message is shown.  
+**Why?** Because the variable `user_input` is re‑created each time, and there is no storage for past messages.
+
+---
+
+## 4. Solution – Using `st.session_state` to Store History
+
+`st.session_state` is a dictionary that **persists across script re‑runs**. You can store the entire conversation history as a list of messages.
+
+**Structure of the history list:**
+```python
+[
+    {"role": "user", "content": "Hi"},
+    {"role": "assistant", "content": "Hello!"},
+    {"role": "user", "content": "What is my name?"},
+    {"role": "assistant", "content": "You are Nitish."}
+]
+```
+
+**Initialisation:**
+```python
+if "messages" not in st.session_state:
+    st.session_state.messages = []   # empty list
+```
+
+**Displaying the history:**
+```python
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.text(msg["content"])
+```
+
+**Adding a new message:**
+```python
+st.session_state.messages.append({"role": "user", "content": user_input})
+```
+
+When the script re‑runs, the loop over `st.session_state.messages` prints all past messages, so history is preserved.
+
+---
+
+## 5. Integrating LangGraph
+
+The backend (`langraph_backend.py`) defines a compiled graph called `chatbot`. This graph uses a checkpointer (`MemorySaver`) and requires a `thread_id` in the `config`.
+
+**Backend code (simplified):**
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from typing import Annotated, List, TypedDict
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage
+
+class ChatState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+def chat_node(state: ChatState) -> dict:
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+graph = StateGraph(ChatState)
+graph.add_node("chat_node", chat_node)
+graph.add_edge(START, "chat_node")
+graph.add_edge("chat_node", END)
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+```
+
+Now, in the frontend, we import `chatbot`:
+
+```python
+from langraph_backend import chatbot
+from langchain_core.messages import HumanMessage
+
+# Define config with a thread_id
+CONFIG = {"configurable": {"thread_id": "user123"}}
+
+# When user sends a message:
+if user_input:
+    # Add user message to session history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    
+    # Prepare state for LangGraph
+    input_state = {"messages": [HumanMessage(content=user_input)]}
+    
+    # Invoke the graph with the config
+    response_state = chatbot.invoke(input_state, config=CONFIG)
+    
+    # Extract the AI's reply (last message)
+    ai_message = response_state["messages"][-1]
+    ai_content = ai_message.content
+    
+    # Add AI message to session history
+    st.session_state.messages.append({"role": "assistant", "content": ai_content})
+```
+
+Then the display loop will show both the user and assistant messages.
+
+---
+
+## 6. Final Working Code (Frontend)
+
+```python
+import streamlit as st
+from langraph_backend import chatbot
+from langchain_core.messages import HumanMessage
+
+# 1. Initialise session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 2. Config for persistence (thread_id)
+CONFIG = {"configurable": {"thread_id": "user123"}}
+
+# 3. Display all past messages
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.text(msg["content"])
+
+# 4. Chat input
+user_input = st.chat_input("Type your message...")
+
+if user_input:
+    # Add user message to history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    
+    # Call LangGraph
+    input_state = {"messages": [HumanMessage(content=user_input)]}
+    response_state = chatbot.invoke(input_state, config=CONFIG)
+    ai_message = response_state["messages"][-1]
+    ai_content = ai_message.content
+    
+    # Add AI message to history
+    st.session_state.messages.append({"role": "assistant", "content": ai_content})
+    
+    # Re-run the script to display the new messages
+    st.rerun()
+```
+
+---
+
+## 7. Key Takeaways
+
+| Step | What happens |
+|------|--------------|
+| 1 | User opens the page – `st.session_state.messages` is empty, no messages shown. |
+| 2 | User types a message and presses Enter. |
+| 3 | The script re‑runs. `user_input` is set to the typed text. |
+| 4 | The user message is appended to `st.session_state.messages`. |
+| 5 | LangGraph is called with the new user message (and the full conversation history is automatically included because the checkpointer loads previous messages based on `thread_id`). |
+| 6 | The AI response is appended to `st.session_state.messages`. |
+| 7 | The display loop runs and shows all messages (including the new ones). |
+| 8 | `st.rerun()` forces a fresh re‑run to update the UI with the new messages. |
+
+**Why does LangGraph remember previous messages?**  
+Because the backend uses a checkpointer and we provide the same `thread_id` each time. The checkpointer loads the saved state (containing all previous messages) before executing the graph. The `add_messages` reducer appends the new user message, so the LLM receives the full history.
+
+---
+
+## 8. Summary – UI Development
+
+- Use `st.chat_message` to display chat bubbles.
+- Use `st.chat_input` to get user input.
+- Store the conversation history in `st.session_state` as a list of `{"role": ..., "content": ...}` dictionaries.
+- Every time the script runs, loop through `st.session_state.messages` and display them.
+- When a new message arrives, append it to history, call LangGraph with the same `thread_id`, get the AI reply, append it, and `st.rerun()`.
+
+The result is a fully functional chatbot with a clean UI and persistent short‑term memory, powered by LangGraph.
+
+---
+
+## 013. Streaming in LangGraph (24:59)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
