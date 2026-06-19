@@ -22,6 +22,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+langgraph_chatbot_db
+*.db
+*.sqlite
+*.sqlite3
+dump.sql
+backup/
+*.bin
+langgraph_chatbot_db-shm
+langgraph_chatbot_db-wal
+
 # C extensions
 *.so
 
