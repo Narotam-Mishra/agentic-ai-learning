@@ -6382,4 +6382,376 @@ The backend still uses `graph.compile(checkpointer=checkpointer)` and `chatbot.i
 
 ## 014. How to build a Resume Chat feature like ChatGPT? (39:39)
 
+## Adding Resume Chat Feature to LangGraph Chatbot with Streamlit
+
+This part of tutorial adds the **"Resume Chat"** feature – the ability to start **multiple conversations** and switch between them, just like ChatGPT. The UI gains a sidebar with:
+- A **“New Chat”** button to start a fresh conversation.
+- A list of **all past conversations** (by thread ID) that the user can click to resume.
+
+The implementation uses **dynamic thread IDs** (UUIDs), stores all thread IDs in `st.session_state`, and retrieves conversation history from the LangGraph checkpointer using `get_state()`.
+
+**No backend changes** are required – the existing LangGraph graph and `MemorySaver` checkpointer are sufficient.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Resume Chat** | Users can start new conversations and switch between existing ones; each conversation is identified by a unique `thread_id`. |
+| 2 | **Dynamic thread IDs** | Use `uuid.uuid4()` to generate a unique ID for each new conversation – manual hard‑coded IDs won’t work. |
+| 3 | **Session state** | Store the current `thread_id`, the message history list, and a list of all thread IDs (`chat_threads`) in `st.session_state`. |
+| 4 | **Storing all thread IDs** | When a new conversation starts, append its thread ID to the `chat_threads` list so it appears in the sidebar. |
+| 5 | **Loading a conversation** | Use `chatbot.get_state(config)` with the target thread ID to retrieve the saved state. Extract `messages` from the state. |
+| 6 | **Message format conversion** | LangGraph returns `BaseMessage` objects (with `type` and `content`). Convert them to `{"role": "user" or "assistant", "content": ...}` dictionaries for the UI. |
+| 7 | **UI components** | `st.sidebar.title()`, `st.sidebar.button()`, `st.sidebar.header()`, and loop over `chat_threads` to create clickable buttons. |
+| 8 | **“New Chat” button logic** | Generate a new thread ID, save it to session, reset `messages` history, and append the new ID to `chat_threads`. |
+| 9 | **Thread button click** | On click, update session state with that thread ID, load its messages, and set `messages` history accordingly. |
+| 10 | **Ordering** | Newest conversations should appear at the top – reverse the `chat_threads` list when displaying. |
+| 11 | **Homework** | Replace raw thread IDs with user‑friendly names (e.g., first few words of the first user message). |
+
+---
+
+## 1. Recap: Existing Chatbot Structure
+
+- **Backend** (`langraph_backend.py`): LangGraph graph with `MemorySaver` checkpointer. No changes needed.
+- **Frontend** (`streamlit_frontend.py`): Streamlit UI with `st.chat_message`, `st.chat_input`, and streaming.
+
+The backend stores all conversation states (messages) in RAM (since we use `MemorySaver`). Each conversation is keyed by `thread_id`.
+
+---
+
+## 2. Step‑by‑Step Implementation
+
+### 2.1 Add Sidebar UI
+
+We add a sidebar with a title, a “New Chat” button, and a “My Conversations” header. Later, we’ll populate the list of threads.
+
+```python
+# Sidebar UI
+with st.sidebar:
+    st.title("LangGraph Chat Bot")
+    if st.button("New Chat"):
+        # will be implemented later
+        pass
+    st.header("My Conversations")
+    # will display thread list later
+```
+
+### 2.2 Utility Function: Generate Thread ID
+
+```python
+import uuid
+
+def generate_thread_id():
+    return str(uuid.uuid4())
+```
+
+### 2.3 Initialize Session State
+
+We need three session state keys:
+- `thread_id`: the current conversation’s thread ID.
+- `messages`: list of message dicts for the current conversation.
+- `chat_threads`: list of all thread IDs ever created.
+
+```python
+# Inside the main script (top)
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = generate_thread_id()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "chat_threads" not in st.session_state:
+    st.session_state.chat_threads = []
+```
+
+### 2.4 Utility: Add Thread to List
+
+To avoid duplicates, we check if the thread ID is already present before appending.
+
+```python
+def add_thread(thread_id):
+    if thread_id not in st.session_state.chat_threads:
+        st.session_state.chat_threads.append(thread_id)
+```
+
+When the app first loads, we add the initial thread ID:
+
+```python
+add_thread(st.session_state.thread_id)
+```
+
+### 2.5 “New Chat” Logic
+
+When the user clicks “New Chat”:
+- Generate a new thread ID.
+- Replace the current `thread_id` in session.
+- Clear `messages` history.
+- Add the new thread ID to `chat_threads`.
+
+```python
+def reset_chat():
+    new_thread_id = generate_thread_id()
+    st.session_state.thread_id = new_thread_id
+    st.session_state.messages = []  # clear messages
+    add_thread(new_thread_id)       # add to list
+```
+
+Then in the sidebar button:
+
+```python
+if st.sidebar.button("New Chat"):
+    reset_chat()
+    st.rerun()
+```
+
+### 2.6 Display Threads in Sidebar
+
+We loop through `chat_threads` (reversed for newest first) and create a button for each thread ID.
+
+```python
+for thread_id in reversed(st.session_state.chat_threads):
+    if st.sidebar.button(thread_id, key=thread_id):
+        # load this conversation
+        pass
+```
+
+### 2.7 Load Conversation from a Thread
+
+When a thread button is clicked, we need to:
+1. Set the current `thread_id` to the clicked one.
+2. Retrieve the saved state from LangGraph using `chatbot.get_state()`.
+3. Extract the messages from the state.
+4. Convert messages from `BaseMessage` objects to the UI’s dictionary format.
+5. Update `messages` in session state.
+6. Rerun to refresh UI.
+
+**Utility function to load messages:**
+
+```python
+def load_conversation(thread_id):
+    config = {"configurable": {"thread_id": thread_id}}
+    state_snapshot = chatbot.get_state(config)
+    if state_snapshot is None:
+        return []
+    messages = state_snapshot.values.get("messages", [])
+    # Convert BaseMessage to dict
+    converted = []
+    for msg in messages:
+        if msg.type == "human":
+            role = "user"
+        else:
+            role = "assistant"
+        converted.append({"role": role, "content": msg.content})
+    return converted
+```
+
+**Button handler:**
+
+```python
+if st.sidebar.button(thread_id, key=thread_id):
+    st.session_state.thread_id = thread_id
+    st.session_state.messages = load_conversation(thread_id)
+    st.rerun()
+```
+
+### 2.8 Display Messages (Existing Code)
+
+The existing code already iterates over `st.session_state.messages` and displays them. No change needed.
+
+### 2.9 Streaming with Current Thread
+
+In the main chat input handler, we already use `chatbot.stream()` with the current `thread_id` from session state. That part remains unchanged.
+
+---
+
+## 3. Full Frontend Code (Final)
+
+Below is the complete `streamlit_frontend.py` with all features.
+
+```python
+import streamlit as st
+import uuid
+from langraph_backend import chatbot
+from langchain_core.messages import HumanMessage
+
+# ------------------------------
+# Utility functions
+# ------------------------------
+def generate_thread_id():
+    return str(uuid.uuid4())
+
+def add_thread(thread_id):
+    if thread_id not in st.session_state.chat_threads:
+        st.session_state.chat_threads.append(thread_id)
+
+def reset_chat():
+    new_thread_id = generate_thread_id()
+    st.session_state.thread_id = new_thread_id
+    st.session_state.messages = []
+    add_thread(new_thread_id)
+
+def load_conversation(thread_id):
+    config = {"configurable": {"thread_id": thread_id}}
+    state = chatbot.get_state(config)
+    if state is None:
+        return []
+    messages = state.values.get("messages", [])
+    converted = []
+    for msg in messages:
+        role = "user" if msg.type == "human" else "assistant"
+        converted.append({"role": role, "content": msg.content})
+    return converted
+
+# ------------------------------
+# Session state initialisation
+# ------------------------------
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = generate_thread_id()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "chat_threads" not in st.session_state:
+    st.session_state.chat_threads = []
+
+# Ensure the current thread is in the list
+add_thread(st.session_state.thread_id)
+
+# ------------------------------
+# Sidebar UI
+# ------------------------------
+with st.sidebar:
+    st.title("LangGraph Chat Bot")
+    if st.button("New Chat"):
+        reset_chat()
+        st.rerun()
+    st.header("My Conversations")
+    for thread_id in reversed(st.session_state.chat_threads):
+        if st.button(thread_id, key=thread_id):
+            st.session_state.thread_id = thread_id
+            st.session_state.messages = load_conversation(thread_id)
+            st.rerun()
+
+# ------------------------------
+# Main chat area
+# ------------------------------
+# Display all messages
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.text(msg["content"])
+
+# Chat input
+user_input = st.chat_input("Type your message...")
+if user_input:
+    # Add user message to UI history
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    # Prepare state for LangGraph
+    input_state = {"messages": [HumanMessage(content=user_input)]}
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+    # Stream AI response
+    stream = chatbot.stream(input_state, config=config, stream_mode="messages")
+    
+    def token_generator():
+        for msg_chunk, metadata in stream:
+            if msg_chunk.content:
+                yield msg_chunk.content
+
+    with st.chat_message("assistant"):
+        full_response = st.write_stream(token_generator())
+
+    # Add AI response to history
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.rerun()
+```
+
+---
+
+## 4. Display Logical Names Instead of Thread IDs
+
+**Problem:** Showing raw UUIDs like `8a7f9c4d-...` is ugly and not user‑friendly.
+
+**Solution:** Store a **title** for each conversation (e.g., first 30 characters of the first user message, or “New Chat” if empty). We can store a dictionary mapping `thread_id` → `title` in session state.
+
+### Implementation Steps
+
+1. In session state, add a dictionary `thread_titles`.
+2. When a new conversation starts (either at app load or “New Chat”), set its title.
+3. In the sidebar, display the title instead of the thread ID.
+4. When loading a conversation, we need to also set the title (optional).
+
+We can set the title when the user sends their **first message** – we can update the title for the current thread. Or we can set it when the thread is created.
+
+**Simpler approach:** At thread creation, set title as “New Chat”. Then, when the user sends the first message, update the title to the first 30 characters of that message.
+
+Here’s the modified code:
+
+```python
+# Add to session state initialisation
+if "thread_titles" not in st.session_state:
+    st.session_state.thread_titles = {}
+
+def set_thread_title(thread_id, title):
+    st.session_state.thread_titles[thread_id] = title
+
+def get_thread_title(thread_id):
+    return st.session_state.thread_titles.get(thread_id, "New Chat")
+```
+
+When a new thread is created (in `reset_chat()` or initialisation), set its title to `"New Chat"`.
+
+```python
+def add_thread(thread_id):
+    if thread_id not in st.session_state.chat_threads:
+        st.session_state.chat_threads.append(thread_id)
+        # Set default title
+        st.session_state.thread_titles[thread_id] = "New Chat"
+```
+
+When the user sends a message, if the current thread has title `"New Chat"` (or empty), update the title to the first 30 characters of the user input.
+
+```python
+if user_input:
+    # ... before invoking LangGraph ...
+    current_title = get_thread_title(st.session_state.thread_id)
+    if current_title == "New Chat" or not current_title:
+        new_title = user_input[:30] + ("..." if len(user_input) > 30 else "")
+        set_thread_title(st.session_state.thread_id, new_title)
+    # ... rest of code ...
+```
+
+Then in the sidebar, display the title:
+
+```python
+for thread_id in reversed(st.session_state.chat_threads):
+    title = get_thread_title(thread_id)
+    if st.sidebar.button(title, key=thread_id):
+        # load conversation
+        ...
+```
+
+Now the sidebar shows meaningful names like “Write a 500-word blog…” instead of UUIDs.
+
+---
+
+## 5. Key Takeaways
+
+- **Resume Chat** is implemented purely on the frontend – the backend remains unchanged.
+- **Thread IDs** must be generated dynamically (UUID) so each conversation is unique.
+- **Session state** is crucial for persisting the list of threads and current conversation between Streamlit reruns.
+- **Loading a conversation** uses `chatbot.get_state()` to retrieve the saved state from the checkpointer.
+- **Message format conversion** is necessary because LangGraph uses `BaseMessage` objects, while the UI expects simple dicts with `role` and `content`.
+- **Adding logical names** to threads greatly improves UX; store a title per thread in session state.
+
+---
+
+## 6. Next Steps
+
+As a next step, the `MemorySaver` (RAM‑based checkpointer) will be replaced with a **database‑based checkpointer** (e.g., PostgreSQL), so conversations survive server restarts. This will make the “Resume Chat” feature **persistent across app reloads**.
+
+---
+
+## 015. LangGraph + SQLite | Chatbot with Database Integration (28:47)
+
+
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
