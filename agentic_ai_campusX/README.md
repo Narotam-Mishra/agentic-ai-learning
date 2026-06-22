@@ -7903,8 +7903,399 @@ print(result["output"])
 
 ---
 
+## LangGraph + LangSmith Integration & Advanced LangSmith Features
+
+This part of lecture of the LangSmith tutorial covers two major topics:
+
+1. **How LangSmith integrates with LangGraph** – tracing graphs, nodes, and the entire workflow execution.
+2. **Advanced LangSmith features** beyond observability: monitoring & alerting, evaluation, prompt experimentation, dataset creation, user feedback, and collaboration.
+
+The instructor uses a **UPSC essay evaluation workflow** (built with LangGraph) to demonstrate how LangSmith traces parallel nodes, structured outputs, and the complete graph execution.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **LangGraph + LangSmith integration** | Since both products are from the same team, integration is seamless. |
+| 2 | **Graph execution → Trace** | When you execute a LangGraph workflow, the entire execution becomes **one trace** in LangSmith. |
+| 3 | **Node → Run** | Each node in the graph becomes **one run** inside the trace. |
+| 4 | **Function-level tracing** | You can also trace the individual Python functions inside nodes using `@traceable`. |
+| 5 | **Parallel nodes** | LangSmith correctly shows parallel execution – nodes run simultaneously and their outputs merge at the next node. |
+| 6 | **Structured output nodes** | Nodes using `with_structured_output` show the schema and parsed output in the trace. |
+| 7 | **Monitoring** | Aggregates metrics across multiple traces – latency, token usage, cost, error rates. |
+| 8 | **Alerting** | Set alerts when metrics drift outside acceptable ranges (e.g., latency > 5 seconds). |
+| 9 | **Evaluation** | Systematically measure LLM output quality using test datasets and metrics like faithfulness, relevance, completeness. |
+| 10 | **Prompt Experimentation** | A/B test different prompt versions on the same dataset to find the best performer. |
+| 11 | **Dataset creation** | Build and version datasets for evaluation and fine-tuning; support manual annotation. |
+| 12 | **User feedback** | Capture thumbs up/down or structured feedback from users, linked to specific traces. |
+| 13 | **Collaboration** | Share trace links, dashboards, and prompts with team members for effective debugging and iteration. |
+
+---
+
+## 1. LangGraph + LangSmith Integration – How It Works
+
+### The Core Mapping
+
+| LangGraph Concept | LangSmith Concept |
+|-------------------|-------------------|
+| **Entire Graph Execution** (one run of the workflow) | **One Trace** |
+| **Each Node** (task/step in the graph) | **One Run** inside the trace |
+| **Node's Python function** | Can be traced as a separate run using `@traceable` |
+
+### Example: UPSC Essay Evaluation Graph
+
+The graph structure:
+
+```
+START
+  ├── evaluate_language (parallel)
+  ├── evaluate_analysis (parallel)
+  └── evaluate_clarity (parallel)
+          ↓
+    final_evaluation_node
+          ↓
+         END
+```
+
+- Three parallel nodes: language, analysis, clarity.
+- Each node returns a **feedback text** and a **score**.
+- The final node aggregates all feedbacks and calculates the average score.
+
+**What LangSmith shows:**
+
+- **One trace** for the entire graph execution.
+- **Three runs** for the parallel nodes (they execute simultaneously).
+- **One run** for the final evaluation node.
+- **Additional runs** if `@traceable` is used on the node functions.
+
+### Code Structure
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langsmith import traceable
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+from typing import TypedDict, List
+
+# ---------- State ----------
+class UPSCState(TypedDict):
+    essay: str
+    language_feedback: str
+    analysis_feedback: str
+    clarity_feedback: str
+    overall_feedback: str
+    individual_scores: List[int]
+    average_score: float
+
+# ---------- Structured Output Schema ----------
+class EvaluationSchema(BaseModel):
+    feedback: str = Field(description="Detailed feedback")
+    score: int = Field(description="Score out of 10", ge=0, le=10)
+
+# ---------- LLM with Structured Output ----------
+model = ChatOpenAI(model="gpt-4o-mini")
+structured_model = model.with_structured_output(EvaluationSchema)
+
+# ---------- Node Functions (with @traceable) ----------
+@traceable(name="evaluate_language")
+def evaluate_language(state: UPSCState) -> dict:
+    prompt = f"Evaluate the language quality of this essay:\n{state['essay']}"
+    result = structured_model.invoke(prompt)
+    return {
+        "language_feedback": result.feedback,
+        "individual_scores": [result.score]   # reducer will merge
+    }
+
+@traceable(name="evaluate_analysis")
+def evaluate_analysis(state: UPSCState) -> dict:
+    prompt = f"Evaluate the depth of analysis in this essay:\n{state['essay']}"
+    result = structured_model.invoke(prompt)
+    return {
+        "analysis_feedback": result.feedback,
+        "individual_scores": [result.score]
+    }
+
+@traceable(name="evaluate_clarity")
+def evaluate_clarity(state: UPSCState) -> dict:
+    prompt = f"Evaluate the clarity of thought in this essay:\n{state['essay']}"
+    result = structured_model.invoke(prompt)
+    return {
+        "clarity_feedback": result.feedback,
+        "individual_scores": [result.score]
+    }
+
+@traceable(name="final_evaluation")
+def final_evaluation(state: UPSCState) -> dict:
+    # Generate overall feedback
+    prompt = f"""
+    Based on these feedbacks, create a single summarised feedback:
+    Language: {state['language_feedback']}
+    Analysis: {state['analysis_feedback']}
+    Clarity: {state['clarity_feedback']}
+    """
+    overall = model.invoke(prompt)
+    
+    # Calculate average score
+    avg = sum(state["individual_scores"]) / len(state["individual_scores"])
+    
+    return {
+        "overall_feedback": overall.content,
+        "average_score": round(avg, 2)
+    }
+
+# ---------- Build Graph ----------
+graph = StateGraph(UPSCState)
+graph.add_node("evaluate_language", evaluate_language)
+graph.add_node("evaluate_analysis", evaluate_analysis)
+graph.add_node("evaluate_clarity", evaluate_clarity)
+graph.add_node("final_evaluation", final_evaluation)
+
+# Parallel edges from START to all three evaluators
+graph.add_edge(START, "evaluate_language")
+graph.add_edge(START, "evaluate_analysis")
+graph.add_edge(START, "evaluate_clarity")
+
+# All three go to final_evaluation
+graph.add_edge("evaluate_language", "final_evaluation")
+graph.add_edge("evaluate_analysis", "final_evaluation")
+graph.add_edge("evaluate_clarity", "final_evaluation")
+
+graph.add_edge("final_evaluation", END)
+
+# ---------- Compile and Execute ----------
+workflow = graph.compile()
+
+config = {
+    "run_name": "evaluate_upsc_essay",
+    "tags": ["essay_evaluation", "upsc"],
+    "metadata": {"model": "gpt-4o-mini"}
+}
+
+initial_state = {
+    "essay": "India has many smart students...",
+    "language_feedback": "",
+    "analysis_feedback": "",
+    "clarity_feedback": "",
+    "overall_feedback": "",
+    "individual_scores": [],
+    "average_score": 0.0
+}
+
+result = workflow.invoke(initial_state, config=config)
+print(result)
+```
+
+### What Appears in LangSmith
+
+| Trace Element | What You See |
+|---------------|--------------|
+| **Trace name** | `evaluate_upsc_essay` (custom run name) |
+| **Trace tags** | `["essay_evaluation", "upsc"]` |
+| **Trace metadata** | `{"model": "gpt-4o-mini"}` |
+| **Runs (parallel)** | Three runs – `evaluate_language`, `evaluate_analysis`, `evaluate_clarity` – all with the same parent, showing they ran in parallel. |
+| **Each run** | Shows the input state, the prompt, the structured output (feedback + score), latency, token usage, and cost. |
+| **Final run** | `final_evaluation` run shows the aggregated feedback and average score. |
+| **Function-level runs** | Each `@traceable` function appears as a separate run inside the node run. |
+
+**Why this is powerful:**
+- You can see **exactly** which node took the most time.
+- You can see **what prompt** was sent to each LLM and **what response** was received.
+- You can see **cost per node** – if one node uses more tokens than others, you can identify it immediately.
+- Parallel execution is correctly visualised – three nodes running at the same time.
+
+---
+
+## 2. Advanced LangSmith Features
+
+### 2.1 Monitoring & Alerting
+
+**Monitoring** = tracking **multiple traces over time** to understand system health.
+
+| Metric | What It Tracks |
+|--------|----------------|
+| **Trace count** | How many requests your app handles per day. |
+| **Latency** | Average response time across all requests. |
+| **Token usage** | Average input/output tokens per request. |
+| **Cost** | Average cost per trace. |
+| **Error rate** | Percentage of traces with errors. |
+| **Tool usage** | How often tools are called. |
+
+**Alerting** = notifying your team when metrics go outside acceptable ranges.
+
+```python
+# Conceptual example – you'd set this in LangSmith UI, not in code
+alert_rule = {
+    "project": "langgraph_essay_checker",
+    "metric": "latency",
+    "condition": "> 5.0 seconds",
+    "action": "send_slack_notification"
+}
+```
+
+**Why monitoring matters:**
+> “In production, issues often appear first as patterns across multiple runs, rather than as a single trace. Monitoring helps you catch early signals before they impact users at scale.”
+
+### 2.2 Evaluation
+
+**Evaluation** = systematically measuring the quality of your LLM outputs against gold‑standard datasets or custom metrics.
+
+**Common evaluation metrics:**
+- **Faithfulness** – Does the answer stick to the provided context? (No hallucinations)
+- **Relevance** – Is the answer relevant to the question?
+- **Completeness** – Does the answer cover all aspects of the question?
+- **Hallucination** – Does the model make up information?
+
+**Method: LLM as a Judge**
+- Use a **second LLM** to evaluate the output of your primary LLM.
+- The judge LLM scores the output on various criteria.
+
+```python
+# Conceptual – using LangSmith's built-in evaluators
+from langsmith.evaluation import evaluate
+
+# Define a dataset of questions + expected answers
+dataset = [
+    {"question": "What is the capital of India?", "expected": "New Delhi"},
+    {"question": "What is 2+2?", "expected": "4"}
+]
+
+# Run evaluation on your chain
+evaluate(
+    chain.invoke,
+    data=dataset,
+    evaluators=["hallucination", "faithfulness", "relevance"]
+)
+```
+
+### 2.3 Prompt Experimentation
+
+**Prompt experimentation** = systematically testing different prompt versions to find the best one.
+
+**How it works:**
+- Define a **test dataset** (questions + expected answers).
+- Create **multiple prompt versions** (A, B, C…).
+- Run the **same dataset** through each prompt version.
+- Compare results using **evaluation metrics**.
+- Choose the prompt that performs best.
+
+**Example:**
+
+| Prompt Version | Avg Score | Latency | Cost |
+|----------------|-----------|---------|------|
+| Prompt A (current) | 8.2/10 | 2.5s | $0.05 |
+| Prompt B (new) | 8.7/10 | 2.8s | $0.06 |
+| Prompt C (experimental) | 8.0/10 | 2.1s | $0.04 |
+
+**Decision:** Prompt B gives the best quality → deploy it.
+
+### 2.4 Dataset Creation & Annotation
+
+**Datasets** are essential for evaluation and fine‑tuning. LangSmith provides tools to:
+- **Import** existing datasets (CSV, JSON, or from traces).
+- **Create** new datasets from scratch.
+- **Annotate** (label) data manually.
+- **Version** datasets for reproducibility.
+
+**Creating a dataset from a trace:**
+- Find a trace in LangSmith.
+- Click **“Add to Dataset”** – it becomes a row in your dataset.
+- Add annotations (e.g., correct/incorrect, score).
+
+```python
+# Conceptual – adding a trace to a dataset
+# In LangSmith UI: find trace → click "Add to Dataset" → select dataset
+```
+
+### 2.5 User Feedback Integration
+
+**User feedback** = capturing users’ reactions to your LLM responses.
+
+**Implementation:**
+- Add **thumbs up/down** buttons to your UI.
+- When a user clicks, send the feedback to LangSmith via the API.
+
+```python
+# Conceptual – capturing user feedback
+from langsmith import Client
+
+client = Client()
+
+# After receiving a response, get the trace ID
+trace_id = "some_trace_id"
+
+# User clicks thumbs up
+client.create_feedback(
+    trace_id=trace_id,
+    key="user_satisfaction",
+    score=1.0   # 1.0 = positive
+)
+
+# User clicks thumbs down
+client.create_feedback(
+    trace_id=trace_id,
+    key="user_satisfaction",
+    score=0.0   # 0.0 = negative
+)
+```
+
+**What you can do with feedback:**
+- See average satisfaction per prompt version.
+- Filter traces by feedback score to analyse good/bad responses.
+- Use feedback to improve your prompts or models.
+
+### 2.6 Collaboration
+
+LangSmith is designed for **team collaboration**:
+
+| Feature | Description |
+|---------|-------------|
+| **Share trace links** | Copy a link to any trace and share with a team member. They see the exact same trace on their machine. |
+| **Shared projects** | All team members can view and analyse traces from the same project. |
+| **Prompt versioning** | Track changes to prompts over time; see who made what change. |
+| **Custom dashboards** | Create and share custom dashboards with team‑specific metrics. |
+
+**Why collaboration matters:**
+- Before LangSmith, teams shared **screenshots** and **emails** to debug issues.
+- With LangSmith, you share **live links** – everyone sees the exact same data, making debugging much faster.
+
+---
+
+## 3. Summary: LangSmith Features at a Glance
+
+| Feature Category | What It Does | When to Use |
+|------------------|--------------|-------------|
+| **Observability** | Trace every component of a single run | Debugging, understanding how the system works |
+| **Monitoring** | Track metrics across many runs | Production – catching performance/cost issues early |
+| **Alerting** | Notify when metrics go outside limits | Production – proactive issue detection |
+| **Evaluation** | Measure output quality against gold standards | Testing new versions before deployment |
+| **Prompt Experimentation** | A/B test prompts to find the best one | Iterating on prompts, improving quality |
+| **Dataset Creation** | Build and version test datasets | Evaluation and fine‑tuning |
+| **User Feedback** | Capture user reactions to responses | Improving system based on real‑user data |
+| **Collaboration** | Share traces, dashboards, and prompts | Team debugging, knowledge sharing |
+
+---
+
+## 4. Key Takeaways
+
+- **LangGraph + LangSmith integration is seamless** – the graph becomes a trace, each node becomes a run.
+- **Parallel execution is visualised correctly** – you can see multiple nodes running simultaneously.
+- **Use `@traceable`** to trace individual functions inside nodes for even more granularity.
+- **Monitoring** (aggregating across traces) is different from **observability** (analysing a single trace) – both are essential.
+- **Evaluation and prompt experimentation** help you systematically improve your LLM application, not just guess.
+- **User feedback** closes the loop – real users tell you what’s working and what’s not.
+- **Collaboration features** make LangSmith a team‑friendly tool, not just for individual developers.
+
+
+**Final advice:** Always integrate LangSmith when building complex LangGraph workflows – it helps with both debugging and learning how your system actually works.
+
 ### Useful Links
 - [LangSmith](https://smith.langchain.com)
+
+---
+
+## 017. Observability in LangGraph | LangSmith Integration with LangGraph (21:39)
 
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
