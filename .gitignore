@@ -32,6 +32,10 @@ backup/
 langgraph_chatbot_db-shm
 langgraph_chatbot_db-wal
 
+# indices
+.indices/
+
+
 # C extensions
 *.so
 

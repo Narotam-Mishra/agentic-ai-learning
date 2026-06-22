@@ -7325,6 +7325,584 @@ LangSmith will show the retriever’s input (query), output (retrieved documents
 
 ---
 
+## Tracing RAG Applications with LangSmith
+
+This part of tutorial explains **why RAG applications are hard to debug** and how **LangSmith** provides the observability needed to diagnose issues. It covers two major problems with RAG in production – **retriever vs generator errors** and **latency** – and demonstrates practical solutions using LangSmith traces, custom `@traceable` decorators, and FAISS vector indexes with caching.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Retriever errors** | The retriever fetches irrelevant or wrong documents, leading to poor answers. |
+| 2 | **Generator errors** | Even with good context, the LLM hallucinates or ignores the provided context. |
+| 3 | **RAG debugging challenge** | Without tracing, you cannot tell if the problem is with the retriever or the generator. |
+| 4 | **LangSmith tracing** | Traces every intermediate step – query, retrieved documents, final prompt, LLM response. |
+| 5 | **Default tracing limitation** | LangSmith only traces LangChain runnables (where `invoke()` is called). Non-runnable steps (PDF loading, chunking) are not traced by default. |
+| 6 | **`@traceable` decorator** | Allows you to trace **any** Python function, even if it doesn't use LangChain runnables. |
+| 7 | **Latency problem** | In a naive RAG implementation, the PDF is loaded, chunked, and embedded on **every run**. |
+| 8 | **Solution: persistent index** | Build a FAISS index once and store it locally. On subsequent runs, load the existing index instead of rebuilding. |
+| 9 | **When index is rebuilt** | When PDF content changes, chunking parameters change, embedding model changes, or the index does not exist. |
+| 10 | **Hierarchical tracing** | With `@traceable`, you can create nested traces – one parent trace contains the setup pipeline and the query pipeline together. |
+| 11 | **Custom tags and metadata** | Attach tags and metadata to each component to enable filtering and search in LangSmith UI. |
+
+---
+
+## 1. Why RAG Apps Are Hard to Debug
+
+A RAG (Retrieval-Augmented Generation) system:
+1. User asks a question.
+2. Retriever fetches relevant documents from a knowledge base.
+3. LLM receives both the question and the retrieved context.
+4. LLM generates an answer.
+
+### Two Types of Errors
+
+| Error Type | Description | Root Cause |
+|------------|-------------|------------|
+| **Retriever Error** | Irrelevant/wrong documents are fetched. | Bad retrieval algorithm, poor embeddings, wrong chunking, wrong query formulation. |
+| **Generator Error** | LLM ignores the context or hallucinates. | Weak prompt (not enforcing "answer only from context"), poor model, or misunderstanding. |
+
+**The core problem:** When the final answer is wrong, you cannot tell whether the retriever or the generator caused the failure – because you cannot see the intermediate steps.
+
+---
+
+## 2. How LangSmith Solves This
+
+LangSmith traces **every intermediate step**:
+- User query
+- Documents retrieved by the retriever
+- The final prompt (combining query + context)
+- The LLM response
+- Token usage and latency per component
+
+**Result:** You can see exactly what the retriever returned and what the LLM received, making it easy to diagnose whether the problem is retrieval or generation.
+
+---
+
+## 3. Demo RAG Application
+
+The demo uses a PDF book ("Introduction to Statistical Learning") and answers questions about it.
+
+### Naive RAG Implementation (Version 1)
+
+```python
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnableParallel, RunnablePassthrough
+from langchain.vectorstores import FAISS
+
+# Load PDF
+loader = PyPDFLoader("book.pdf")
+docs = loader.load()
+
+# Split into chunks
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+chunks = splitter.split_documents(docs)
+
+# Create embeddings and vector store
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vectorstore = FAISS.from_documents(chunks, embeddings)
+retriever = vectorstore.as_retriever()
+
+# Define prompt
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "Answer only from the provided context. If not found, say 'I don't know'."),
+    ("user", "Context: {context}\nQuestion: {question}")
+])
+
+model = ChatOpenAI(model="gpt-4o-mini")
+parser = StrOutputParser()
+
+# Build chain with parallel retrieval
+chain = (
+    RunnableParallel({
+        "context": retriever | lambda docs: "\n".join([d.page_content for d in docs]),
+        "question": RunnablePassthrough()
+    })
+    | prompt
+    | model
+    | parser
+)
+
+# Query
+result = chain.invoke("Who is the author of this book?")
+print(result)
+```
+
+---
+
+## 4. Problem 1 – Incomplete Tracing
+
+When we run this code, LangSmith only traces the **chain part** (the runnables). The PDF loading, chunking, and embedding steps are **not traced** because they are not LangChain runnables.
+
+**What you see in LangSmith:**
+- `RunnableParallel` (question passthrough + retrieval)
+- `ChatPromptTemplate`
+- `ChatOpenAI`
+- `StrOutputParser`
+
+**What you don't see:**
+- PDF loading time
+- Chunking configuration
+- Embedding model used
+- Vector store creation time
+
+---
+
+## 5. Solution 1 – Using `@traceable` Decorator
+
+LangSmith provides a `@traceable` decorator that can trace **any Python function**.
+
+```python
+from langsmith import traceable
+
+@traceable(name="load_pdf")
+def load_pdf(file_path):
+    loader = PyPDFLoader(file_path)
+    return loader.load()
+
+@traceable(name="split_documents")
+def split_documents(docs, chunk_size=1000, chunk_overlap=150):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    return splitter.split_documents(docs)
+
+@traceable(name="build_vector_store")
+def build_vector_store(docs, embedding_model="text-embedding-3-small"):
+    embeddings = OpenAIEmbeddings(model=embedding_model)
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    return vectorstore.as_retriever()
+
+@traceable(name="setup_pipeline")
+def setup_pipeline(file_path):
+    docs = load_pdf(file_path)
+    chunks = split_documents(docs)
+    retriever = build_vector_store(chunks)
+    return retriever
+```
+
+**Result:** Now LangSmith traces **the entire pipeline**, including the setup steps.
+
+---
+
+## 6. Problem 2 – Latency on Every Run
+
+In the current implementation, **every run** loads the PDF, splits it, and generates embeddings. This is wasteful because:
+- The PDF content never changes.
+- The embeddings are the same each time.
+- The setup takes ~15–20 seconds, while the actual query takes ~1–2 seconds.
+
+**Ideal behaviour:**
+- First run: build the vector index and store it.
+- Subsequent runs: load the existing index and query it (much faster).
+
+---
+
+## 7. Solution 2 – Persistent FAISS Index with Caching
+
+We build a **persistent index** that is saved locally and reused.
+
+### Key logic:
+
+```python
+import os
+from pathlib import Path
+
+def build_index_if_not_exists(file_path, index_path=".indexes", 
+                              chunk_size=1000, chunk_overlap=150,
+                              embedding_model="text-embedding-3-small"):
+    """
+    Builds a FAISS index if it doesn't exist or if parameters have changed.
+    Otherwise, loads the existing index.
+    """
+    # Check if index already exists
+    index_dir = Path(index_path)
+    index_file = index_dir / "faiss_index"
+    
+    if index_file.exists():
+        # Check if parameters match (PDF file, chunk size, embedding model)
+        # If everything matches, load the existing index
+        embeddings = OpenAIEmbeddings(model=embedding_model)
+        vectorstore = FAISS.load_local(index_dir, embeddings)
+        return vectorstore.as_retriever()
+    
+    # If not, build the index
+    docs = load_pdf(file_path)
+    chunks = split_documents(docs, chunk_size, chunk_overlap)
+    embeddings = OpenAIEmbeddings(model=embedding_model)
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    
+    # Save the index
+    vectorstore.save_local(index_dir)
+    return vectorstore.as_retriever()
+```
+
+### When the index is rebuilt:
+
+| Condition | Trigger |
+|-----------|---------|
+| **First run** | No existing index → build. |
+| **PDF changes** | Different file content, modified time, or size → rebuild. |
+| **Chunk parameters change** | `chunk_size` or `chunk_overlap` changed → rebuild. |
+| **Embedding model changes** | Different model name → rebuild. |
+
+### Result:
+
+| Run | Time | What happens |
+|-----|------|--------------|
+| **First run** | ~15–20 sec | Build index from scratch. |
+| **Subsequent runs** | ~1–5 sec | Load existing index and query. |
+
+---
+
+## 8. Complete Flow with Tracing + Persistence
+
+The final code combines:
+
+- **`@traceable`** for full observability.
+- **Persistent FAISS** for speed.
+- **Custom tags and metadata** for filtering.
+
+```python
+import os
+from pathlib import Path
+from langsmith import traceable
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.vectorstores import FAISS
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnableParallel, RunnablePassthrough
+
+os.environ["LANGCHAIN_PROJECT"] = "rag_chatbot"
+
+# ---------- Setup functions with traceable ----------
+@traceable(name="load_pdf", tags=["pdf", "loader"], metadata={"loader": "PyPDFLoader"})
+def load_pdf(file_path):
+    loader = PyPDFLoader(file_path)
+    return loader.load()
+
+@traceable(name="split_documents", tags=["chunking"])
+def split_documents(docs, chunk_size=1000, chunk_overlap=150):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    return splitter.split_documents(docs)
+
+@traceable(name="build_vector_store", tags=["embeddings", "vector_store"],
+           metadata={"embedding_model": "text-embedding-3-small"})
+def build_vector_store(docs, embedding_model="text-embedding-3-small"):
+    embeddings = OpenAIEmbeddings(model=embedding_model)
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    return vectorstore
+
+@traceable(name="setup_pipeline")
+def setup_pipeline(file_path, index_path=".indexes", chunk_size=1000, chunk_overlap=150):
+    index_dir = Path(index_path)
+    index_dir.mkdir(exist_ok=True)
+    
+    # Check if index exists (simplified logic)
+    if (index_dir / "faiss_index").exists():
+        print("Loading existing index...")
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        vectorstore = FAISS.load_local(index_dir, embeddings)
+        return vectorstore.as_retriever()
+    
+    print("Building index from scratch...")
+    docs = load_pdf(file_path)
+    chunks = split_documents(docs, chunk_size, chunk_overlap)
+    vectorstore = build_vector_store(chunks)
+    vectorstore.save_local(index_dir)
+    return vectorstore.as_retriever()
+
+# ---------- RAG Query ----------
+@traceable(name="rag_query", run_type="chain")
+def rag_query(question, retriever):
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Answer only from the provided context. If not found, say 'I don't know'."),
+        ("user", "Context: {context}\nQuestion: {question}")
+    ])
+    model = ChatOpenAI(model="gpt-4o-mini")
+    parser = StrOutputParser()
+    
+    chain = (
+        RunnableParallel({
+            "context": retriever | lambda docs: "\n".join([d.page_content for d in docs]),
+            "question": RunnablePassthrough()
+        })
+        | prompt
+        | model
+        | parser
+    )
+    return chain.invoke(question)
+
+# ---------- Main ----------
+if __name__ == "__main__":
+    retriever = setup_pipeline("book.pdf")
+    answer = rag_query("Who is the author of this book?", retriever)
+    print(answer)
+```
+
+**What LangSmith now shows:**
+
+- One parent trace (`setup_pipeline`) containing:
+  - `load_pdf` with tags `["pdf", "loader"]` and metadata `{"loader": "PyPDFLoader"}`
+  - `split_documents` with tag `["chunking"]`
+  - `build_vector_store` with tag `["embeddings", "vector_store"]` and metadata `{"embedding_model": "text-embedding-3-small"}`
+- A separate trace for `rag_query` showing:
+  - `RunnableParallel` (question pass-through + retrieval)
+  - `ChatPromptTemplate`
+  - `ChatOpenAI`
+  - `StrOutputParser`
+
+**On subsequent runs:**
+- The `setup_pipeline` trace shows **`load_index`** (reusing the existing FAISS index) instead of rebuilding.
+- Latency drops from ~15–20 seconds to ~1–2 seconds.
+
+---
+
+## 9. Advanced: Custom Tags and Metadata
+
+```python
+@traceable(
+    name="load_pdf",
+    tags=["pdf", "loader"],
+    metadata={
+        "loader": "PyPDFLoader",
+        "file_name": "book.pdf",
+        "pages": 441
+    }
+)
+def load_pdf(file_path):
+    ...
+```
+
+These tags and metadata appear in the LangSmith UI and are **searchable** – you can filter traces by model, loader, chunk size, or any custom metadata.
+
+---
+
+## 10. Key Takeaways
+
+- **RAG is hard to debug** because errors can come from the retriever or the generator, and you can't see inside the black box.
+- **LangSmith provides granular tracing** – every step, input, output, latency, token usage, and cost.
+- **Default LangSmith tracing** only covers LangChain runnables (chains, models, parsers).
+- **`@traceable` decorator** allows you to trace any Python function, even those without LangChain.
+- **RAG latency can be reduced** by building a persistent FAISS index and reusing it.
+- **Custom tags and metadata** make traces searchable – essential for large production systems.
+- **Full end‑to‑end tracing** (including setup) helps you identify whether the issue is in the retriever, the prompt, or the LLM.
+
+---
+
+## 11. Summary of Problems and Solutions
+
+| Problem | Solution |
+|---------|----------|
+| Only partial tracing (chain only) | Use `@traceable` on all functions |
+| Can't tell retriever vs generator errors | Full trace shows both the retrieved docs and the final prompt |
+| Slow on every run (PDF loading + embedding) | Persist FAISS index locally and reuse |
+| Traces are in two separate pieces | Use `@traceable` with hierarchy – one parent trace containing both setup and query |
+
+---
+
+## Tracing Agentic AI Applications with LangSmith (Contd...)
+
+This final section of the tutorial demonstrates how LangSmith traces **agentic applications** – specifically a **ReAct agent** that uses tools (DuckDuckGo search and a weather API) to answer complex queries. The tutorial shows step‑by‑step how the agent’s **Think → Act → Observe** loop is captured in LangSmith traces, making debugging and understanding agent behaviour much easier.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **ReAct agent** | An agent that follows a **Reason + Act** loop: Think (reason about the problem), Act (call a tool), Observe (get the result), and repeat until a final answer is reached. |
+| 2 | **Scratchpad** | A working memory where the agent stores all intermediate thoughts, actions, and observations. |
+| 3 | **LangSmith trace for agents** | Shows every iteration of the ReAct loop – each thought, tool call, and observation is a separate run within the trace. |
+| 4 | **Why tracing agents is essential** | Agents are autonomous and can take multiple steps. Without tracing, you cannot see why they made certain decisions or if they are stuck in a loop. |
+| 5 | **Tool call tracing** | Each tool call (search, weather API) is traced with its input, output, latency, and token usage. |
+| 6 | **Scratchpad evolution** | LangSmith shows how the scratchpad grows with each iteration – new thoughts, actions, and observations are appended. |
+| 7 | **Complex queries** | Agents can chain tools – e.g., search for a birth place, then use that result to get weather data. LangSmith shows the entire chain. |
+| 8 | **Cost and latency monitoring** | LangSmith provides total token usage and cost per agent run, plus latency per step. |
+| 9 | **Debugging agent failures** | If an agent gives a wrong answer, you can trace back to see which tool call or reasoning step went wrong. |
+| 10 | **LangGraph integration** | Future videos will build agents with LangGraph – and LangSmith will be integrated to trace those as well. |
+
+---
+
+## 1. The ReAct Agent Demo
+
+The agent has **two tools**:
+1. **DuckDuckGo search** – for searching general information.
+2. **Weather API** – for getting current temperature of a city.
+
+### Simple Query: “What is the current temperature of Gurugram?”
+
+The agent’s reasoning (visible in LangSmith trace):
+
+| Step | Component | Content |
+|------|-----------|---------|
+| 1 | **Thought** | “I should use the get_weather_data tool.” |
+| 2 | **Action** | `get_weather_data` with input `“Gurugram”` |
+| 3 | **Observation** | Weather data: temperature 30°C, humidity 60%, wind speed 5 km/h |
+| 4 | **Final answer** | “The current temperature of Gurugram is 30°C.” |
+
+### Complex Query: “Identify the birthplace of Kalpana Chawla and give its current temperature.”
+
+The agent must:
+1. **Search** for Kalpana Chawla’s birthplace → finds Karnal.
+2. **Get weather** for Karnal → returns temperature.
+3. **Combine** both to give the final answer.
+
+This requires **two tool calls** in sequence. LangSmith shows both steps clearly.
+
+---
+
+## 2. What LangSmith Traces in an Agent
+
+### Trace Structure (for a single agent run)
+
+```
+RunnableSequence (top level)
+├── Agent Scratchpad Initialization
+├── Prompt Template (with system prompt + question)
+├── ChatOpenAI (LLM call #1)
+├── Tool Call: DuckDuckGo Search
+│   ├── Input: "Kalpana Chawla birthplace city"
+│   └── Output: search results (HTML/text)
+├── Agent Scratchpad Update (append thought + action + observation)
+├── Prompt Template (with updated scratchpad)
+├── ChatOpenAI (LLM call #2 – reasoning about next step)
+├── Tool Call: get_weather_data
+│   ├── Input: "Karnal"
+│   └── Output: weather JSON
+├── Agent Scratchpad Update (append observation)
+├── Prompt Template (final prompt with full history)
+├── ChatOpenAI (LLM call #3 – generate final answer)
+└── Final output
+```
+
+### Key Observations
+
+- **Every LLM call** is traced – you can see the prompt sent and the response received.
+- **Every tool call** is traced – you see the exact input and output (including raw API responses).
+- **Scratchpad updates** are visible – you can see how the agent’s memory evolves.
+- **Latency, token usage, and cost** are shown for each run and each sub‑component.
+
+---
+
+## 3. Why Tracing Agents is Even More Important
+
+| Without LangSmith | With LangSmith |
+|-------------------|----------------|
+| You see only the final output. | You see every thought, action, and observation. |
+| You cannot tell why the agent made a decision. | You can see the exact reasoning that led to each decision. |
+| If the agent gives a wrong answer, you don’t know which step failed. | You can pinpoint the exact tool call or reasoning step that caused the error. |
+| Cost spikes are hard to diagnose. | You can see which tool calls or repeated iterations are consuming tokens. |
+| Loops (agent repeating the same step) are invisible. | Loops are visible as repeated LLM calls and tool calls in the trace. |
+
+---
+
+## 4. Code Example: Tracing a ReAct Agent
+
+Below is a simplified version of the agent code used in the demo (with LangSmith tracing enabled automatically via environment variables).
+
+```python
+import os
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.utilities import OpenWeatherMapAPIWrapper
+from langchain.prompts import PromptTemplate
+
+# LangSmith tracing is enabled by setting environment variables
+# (already in .env file)
+os.environ["LANGCHAIN_PROJECT"] = "react_agent_demo"
+
+# ---------- Tools ----------
+search_tool = DuckDuckGoSearchRun()
+weather_tool = OpenWeatherMapAPIWrapper()  # wrapped as a tool
+tools = [search_tool, weather_tool]
+
+# ---------- Prompt ----------
+prompt = PromptTemplate.from_template("""
+You are a helpful assistant with access to the following tools:
+{tools}
+
+Use the following format:
+Question: the input question
+Thought: consider what to do
+Action: the tool to use
+Action Input: the input to the tool
+Observation: the result from the tool
+... (repeat Thought/Action/Observation as needed)
+Thought: I now know the final answer
+Final Answer: the answer to the question
+
+Question: {input}
+""")
+
+# ---------- Agent ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+agent = create_react_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+# ---------- Query ----------
+result = agent_executor.invoke({
+    "input": "Identify the birthplace of Kalpana Chawla and give its current temperature."
+})
+print(result["output"])
+```
+
+**What appears in LangSmith:**
+- A single trace under the project `react_agent_demo`.
+- Inside the trace, you see the iterative Thought → Action → Observation loop.
+- Each tool call appears as a separate run with its own input/output and timing.
+
+---
+
+## 5. Comparing Tracing Types
+
+| Application Type | Default LangSmith Tracing | With `@traceable` |
+|------------------|---------------------------|-------------------|
+| **Simple LLM call** | ✅ Full trace (prompt → model → parser) | Not needed |
+| **RAG (chain only)** | ✅ Full trace of the chain | Setup steps (PDF loading, chunking, embedding) are not traced – need `@traceable` |
+| **RAG (with persistent index)** | ✅ Full trace of query | Setup and index loading are traced with `@traceable` |
+| **Agent** | ✅ Full trace of every iteration | Not needed – LangChain’s `AgentExecutor` is a runnable and is automatically traced |
+
+---
+
+## 6. Key Takeaways for Agent Tracing
+
+- **Agents are complex** – they make multiple decisions and tool calls before returning an answer.
+- **LangSmith shows the entire decision path** – each Thought, Action, and Observation is a separate run.
+- **You can see why the agent chose a tool** – the LLM’s reasoning is captured in the prompt and response.
+- **Tool inputs and outputs are visible** – you can verify that the agent gave the correct input to the tool and that the tool returned the expected data.
+- **Debugging wrong answers** – if the agent returns a wrong answer, you can trace back to see if it was a search error, a weather API error, or a reasoning error.
+- **Cost monitoring** – you can see how many LLM calls were made and how many tokens were used.
+
+---
+
+## 7. Final Conclusion – Why LangSmith Matters
+
+| Problem | LangSmith Solution |
+|---------|-------------------|
+| **LLM applications are black boxes** | Full transparency – every component, every step, every input and output is visible. |
+| **Errors don't produce stack traces** | You can inspect the exact prompt, context, and model response that caused the error. |
+| **Costs can spike unexpectedly** | See token usage and cost per run and per component. |
+| **Agent behaviour is unpredictable** | Trace the entire reasoning loop to understand why the agent made certain decisions. |
+| **Debugging is manual and slow** | All traces are stored, searchable, and comparable. |
+
+**Takeaway:** LangSmith is an essential tool for anyone building production‑grade LLM applications – especially agents, which are inherently complex and non‑deterministic.
+
+---
+
 ### Useful Links
 - [LangSmith](https://smith.langchain.com)
 
