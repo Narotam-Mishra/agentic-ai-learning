@@ -8297,5 +8297,319 @@ LangSmith is designed for **team collaboration**:
 
 ## 017. Observability in LangGraph | LangSmith Integration with LangGraph (21:39)
 
+## Observability in LangGraph's based Chatbot
+
+### What is Observability?
+**Simple Definition**: Tracking and recording everything that happens in your chatbot
+
+**What We Track**:
+- User questions
+- AI responses
+- Token usage
+- System latency
+- Internal working of each component
+
+### Why Observability Matters:
+- Debug complex features (tools, RAG)
+- Monitor performance
+- Understand token costs
+- Identify bottlenecks
+
+---
+
+## 🔧 Setting Up LangSmith
+
+### Step 1: Create Account
+1. Go to `smith.langchain.com`
+2. Create an account
+3. Login to dashboard
+
+### Step 2: Generate API Key
+```
+Settings → API Keys → Create API Key
+```
+
+### Step 3: Add Environment Variables
+Create a `.env` file with:
+
+```python
+LANGCHAIN_TRACING = "true"
+LANGCHAIN_ENDPOINT = "https://api.smith.langchain.com"
+LANGCHAIN_API_KEY = "your-api-key-here"
+LANGCHAIN_PROJECT = "chatbot-project"
+```
+
+---
+
+## 💻 Code Implementation
+
+### Basic Integration (Zero Code Changes!)
+
+**Important**: Just adding environment variables automatically enables tracing!
+
+```python
+# Your existing code works without changes!
+# LangSmith automatically captures:
+# - All LLM calls
+# - Token usage
+# - Latency
+# - Inputs/Outputs
+```
+
+### Example: Simple Chatbot Code
+```python
+from langgraph.graph import StateGraph
+from langchain_openai import ChatOpenAI
+
+# Your regular chatbot code
+llm = ChatOpenAI(model="gpt-3.5-turbo")
+graph = StateGraph(...)  # Your graph structure
+app = graph.compile()
+
+# No LangSmith code needed! 
+# Just set environment variables
+```
+
+---
+
+## 📊 Understanding LangSmith Dashboard
+
+### Project Structure:
+```
+Project (chatbot-project)
+    └── Traces (each user turn)
+         ├── Input (user message)
+         ├── Output (AI response)
+         ├── Token count
+         ├── Latency
+         └── Metadata
+```
+
+### What You See Per Trace:
+- **Input**: User's exact question
+- **Output**: AI's response
+- **Tokens**: Input tokens + Output tokens
+- **Latency**: Time taken to generate response
+- **Status**: Success/Failure
+- **Timing**: First token time, total execution time
+
+---
+
+## 🧵 Advanced: Organizing Traces with Threads
+
+### The Problem:
+Without threads, ALL conversations get mixed together
+
+### The Solution: Add Thread ID
+
+### Code Implementation:
+
+**Before (No Thread Organization):**
+```python
+config = {
+    "configurable": {"thread_id": session_id}
+}
+```
+
+**After (With Thread Organization):**
+```python
+config = {
+    "configurable": {"thread_id": session_id},
+    "metadata": {
+        "thread_id": session_id  # Explicit thread tracking
+    },
+    "run_name": "Chat Turn"  # Better readability
+}
+```
+
+### Full Example:
+```python
+# When invoking your chatbot
+session_id = "user-session-123"  # Unique per conversation
+
+config = {
+    "configurable": {
+        "thread_id": session_id  # LangGraph uses this
+    },
+    "metadata": {
+        "thread_id": session_id  # LangSmith uses this
+    },
+    "run_name": "Chat Turn"  # Display name in dashboard
+}
+
+response = app.invoke(input_data, config=config)
+```
+
+---
+
+## 📊 Thread Organization Benefits
+
+### What Changes:
+1. **Individual Threads**: Each conversation has its own container
+2. **Organized Traces**: All messages from one conversation stay together
+3. **Easy Navigation**: Click thread → See entire conversation history
+4. **Better Debugging**: Find specific conversations quickly
+
+### Example Visualization:
+
+**Thread 1: User Nitesh**
+```
+Turn 1: "Hi" → "Hello!"
+Turn 2: "My name is Nitesh" → "Nice to meet you!"
+Turn 3: "Who created you?" → "I was created by OpenAI"
+```
+
+**Thread 2: User Rahul**
+```
+Turn 1: "Hi, my name is Rahul" → "Hello Rahul!"
+Turn 2: "Roadmap to study AI" → [Detailed roadmap]
+```
+
+---
+
+## 🔍 Monitoring Features
+
+### Token Usage Tracking
+```python
+# Automatically captured by LangSmith
+Input Tokens: 150
+Output Tokens: 250
+Total Tokens: 400
+Cost: $0.0008 (approx)
+```
+
+### Latency Monitoring
+```python
+# What you can see
+Start Time: 12:34:56.123
+End Time: 12:34:58.456
+Duration: 2.333 seconds
+First Token: 0.456 seconds
+```
+
+### Performance Metrics
+- Success/failure rates
+- Average response time
+- Token usage patterns
+- Error tracking
+
+---
+
+## 💡 Key Takeaways
+
+### Why Observability Matters:
+1. **Debugging**: Find exactly what went wrong
+2. **Optimization**: Track token usage and latency
+3. **Monitoring**: Watch system performance
+4. **Analysis**: Understand user interactions
+5. **Production Ready**: Essential for deploying apps
+
+### Benefits of Thread Organization:
+- Clean separation of conversations
+- Better debugging experience
+- Historical analysis per user
+- Easier to find specific interactions
+
+### LangSmith Features Not Covered (But Available):
+- Monitoring dashboards
+- Dataset creation
+- Experiment tracking
+- Prompt playground
+- A/B testing
+
+---
+
+## 🚀 Future Use Cases
+
+When adding complex features, observability helps:
+
+1. **Tools Integration**: See which tools are called
+2. **RAG Implementation**: Track document retrieval
+3. **Multi-agent Systems**: Monitor agent interactions
+4. **MCP Integration**: Debug complex workflows
+
+---
+
+## 📝 Quick Reference
+
+### Environment Setup Checklist:
+- [ ] Create LangSmith account
+- [ ] Generate API key
+- [ ] Add to `.env` file
+- [ ] Set `LANGCHAIN_TRACING=true`
+- [ ] Set project name
+
+### Code Changes Needed:
+- [ ] Add `thread_id` to config
+- [ ] Add metadata with `thread_id`
+- [ ] Add `run_name` for readability
+
+### Viewing Your Data:
+1. Go to LangSmith dashboard
+2. Click your project
+3. View traces in real-time
+4. Click threads for organized view
+
+---
+
+## 🔄 Complete Code Example
+
+```python
+import os
+from dotenv import load_dotenv
+from langgraph.graph import StateGraph
+from langchain_openai import ChatOpenAI
+
+# Load environment variables
+load_dotenv()
+
+# Your chatbot setup
+llm = ChatOpenAI(model="gpt-3.5-turbo")
+# ... build your graph
+
+# Create config with thread tracking
+def create_config(session_id):
+    return {
+        "configurable": {"thread_id": session_id},
+        "metadata": {"thread_id": session_id},
+        "run_name": "Chat Turn"
+    }
+
+# Use in your chat function
+def chat(user_input, session_id):
+    config = create_config(session_id)
+    response = app.invoke(
+        {"messages": user_input}, 
+        config=config
+    )
+    return response
+
+# That's it! Everything is automatically traced
+```
+
+---
+
+## 🎯 Summary
+
+**Observability** = Complete visibility into your chatbot's operations
+
+**Key Benefits**:
+- Track everything automatically
+- Debug with full context
+- Monitor performance
+- Organize conversations
+
+**Two Main Features**:
+1. **Traces**: Individual user turns
+2. **Threads**: Complete conversations
+
+**Why It Matters**: Essential for building production-ready AI applications
+
+**Remember**: Starting simple with observability now makes complex features much easier to debug later!
+
+---
+
+## 018. Tools in LangGraph (34:19)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
