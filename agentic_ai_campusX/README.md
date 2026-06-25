@@ -8611,5 +8611,367 @@ def chat(user_input, session_id):
 
 ## 018. Tools in LangGraph (34:19)
 
+This tutorial demonstrates how to **add tools (actions)** to a LangGraph chatbot, enabling it to perform real‑world tasks like calculations, internet searches, and stock price lookups. The lecture covers:
+
+- The need for tools (making the chatbot **actionable**, not just conversational).
+- The architecture of a LangGraph workflow with tools: **LLM node** + **ToolNode** + **conditional routing** (`tools_condition`) + **loop** between LLM and tools.
+- How to implement custom and pre‑built tools.
+- Integration into the existing chatbot project (backend + frontend).
+- Handling streaming (filtering out tool messages) and showing tool usage status.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Tools in LangGraph** | Enable the chatbot to perform actions (e.g., calculations, search, API calls) beyond text generation. |
+| 2 | **ToolNode** | A pre‑built LangGraph node that manages a collection of tools and executes them when called. |
+| 3 | **`tools_condition`** | A built‑in conditional edge function that routes flow to ToolNode if the LLM requests a tool call, or to END if not. |
+| 4 | **Binding tools to LLM** | Use `llm.bind_tools(tools)` to give the LLM awareness of available tools. |
+| 5 | **LLM–Tool loop** | The graph must loop from ToolNode back to the LLM node so that the LLM can process the tool output and potentially call more tools or give a final answer. |
+| 6 | **Tool definition** | Tools can be **pre‑built** (e.g., `DuckDuckGoSearchRun`) or **custom** (using `@tool` decorator). A good docstring is essential for the LLM to understand the tool’s purpose. |
+| 7 | **State** | The state still holds `messages` (conversation history), which now includes `ToolMessage`s in addition to `HumanMessage` and `AIMessage`. |
+| 8 | **Streaming filtering** | When streaming to the UI, only `AIMessage` content should be displayed; `ToolMessage`s should be hidden or shown as status updates. |
+| 9 | **Status container** | Use `st.status()` in Streamlit to show which tool is being used (better UX). |
+
+---
+
+## 1. Workflow Architecture
+
+### Without Tools (Basic Chatbot)
+```
+START → chat_node (LLM) → END
+```
+
+### With Tools (Tool‑Augmented)
+```
+START → chat_node (LLM with tools)
+           ↓ (conditional via tools_condition)
+      ┌────┴────┐
+      ↓         ↓
+    END      ToolNode (executes the tool)
+                ↓
+           (loop back to chat_node)
+```
+The loop ensures the LLM can see the tool’s output and decide whether to call another tool or generate the final answer.
+
+---
+
+## 2. Code Example: Standalone Tool‑Augmented Workflow
+
+```python
+from typing import TypedDict, List, Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage
+
+# ---------- 1. Define State ----------
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# ---------- 2. Define Tools ----------
+# Pre‑built tool: DuckDuckGo search
+search_tool = DuckDuckGoSearchRun()
+
+# Custom tool: Calculator
+@tool
+def calculator(first_number: float, second_number: float, operation: str) -> float:
+    """Perform basic arithmetic operations: add, subtract, multiply, divide.
+    Args:
+        first_number: first number
+        second_number: second number
+        operation: one of 'add', 'subtract', 'multiply', 'divide'
+    """
+    if operation == "add":
+        return first_number + second_number
+    elif operation == "subtract":
+        return first_number - second_number
+    elif operation == "multiply":
+        return first_number * second_number
+    elif operation == "divide":
+        return first_number / second_number
+    else:
+        raise ValueError("Invalid operation")
+
+# Custom tool: Stock price (using Alpha Vantage)
+import requests
+import os
+
+@tool
+def get_stock_price(symbol: str) -> dict:
+    """Get the current stock price for a given company symbol (e.g., AAPL, TSLA).
+    Returns a dict with price and metadata.
+    """
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
+    response = requests.get(url)
+    return response.json()
+
+tools = [search_tool, calculator, get_stock_price]
+
+# ---------- 3. LLM with Tools ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(tools)
+
+# ---------- 4. Node Functions ----------
+def chat_node(state: AgentState) -> dict:
+    messages = state["messages"]
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+# ---------- 5. Build Graph ----------
+graph = StateGraph(AgentState)
+graph.add_node("chat_node", chat_node)
+tool_node = ToolNode(tools)
+graph.add_node("tools", tool_node)
+
+# Edges
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,  # returns "tools" or "__end__"
+    {
+        "tools": "tools",
+        "__end__": END
+    }
+)
+graph.add_edge("tools", "chat_node")  # loop back to LLM
+
+workflow = graph.compile()
+
+# ---------- 6. Run ----------
+initial_state = {"messages": [HumanMessage(content="What is 2 * 3?")]}
+result = workflow.invoke(initial_state)
+print(result["messages"][-1].content)  # "The result of 2 * 3 is 6"
+```
+
+---
+
+## 3. Tool Definition Best Practices
+
+- **Pre‑built tools**: Import from `langchain_community.tools` (e.g., `DuckDuckGoSearchRun`, `WikipediaQueryRun`).
+- **Custom tools**: Use the `@tool` decorator.
+- **Docstring**: Essential – the LLM reads this to understand the tool’s purpose and arguments.
+- **Type hints**: Help the LLM understand expected input types.
+
+---
+
+## 4. Integration with Existing Chatbot Project
+
+The existing chatbot had a backend (`langraph_backend.py`) and a frontend (`streamlit_frontend.py`). To add tools:
+
+### Backend Changes (`langraph_tool_backend.py`)
+
+- Replace the old graph with the new one that includes `ToolNode` and the loop.
+- Keep the checkpointer (`MemorySaver` or database) unchanged.
+- Export the compiled `workflow` as `chatbot`.
+
+### Frontend Changes (`streamlit_frontend.py`)
+
+- Import the new backend (change the import statement).
+- When streaming, filter messages so only `AIMessage` chunks are displayed (hide `ToolMessage` chunks).
+- Optional: Use `st.status()` to show tool execution status.
+
+**Streaming filter code snippet:**
+
+```python
+from langchain_core.messages import AIMessage, ToolMessage
+
+# Inside the token generator:
+for msg_chunk, metadata in stream:
+    # Only stream AIMessage content; skip ToolMessage
+    if isinstance(msg_chunk, AIMessage) and msg_chunk.content:
+        yield msg_chunk.content
+```
+
+**Status container (advanced):**
+
+```python
+with st.status("Processing...", expanded=False) as status:
+    # ... call the stream
+    # You can update status based on metadata (e.g., tool name)
+```
+
+---
+
+## 5. Homework Solution: Add a Custom Tool
+
+**Task:** Add a **weather tool** that fetches the current temperature of a city using a free weather API (e.g., OpenWeatherMap).
+
+### Step 1: Define the Tool
+
+```python
+import requests
+from langchain_core.tools import tool
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the current temperature in Celsius for a given city.
+    Args:
+        city: Name of the city (e.g., 'London', 'Mumbai')
+    """
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        temp = data['main']['temp']
+        return f"The current temperature in {city} is {temp}°C."
+    else:
+        return f"Could not fetch weather for {city}."
+```
+
+### Step 2: Add to the Tools List
+
+```python
+tools = [search_tool, calculator, get_stock_price, get_weather]
+```
+
+### Step 3: Update the Backend and Test
+
+```python
+# Test query
+initial = {"messages": [HumanMessage(content="What is the weather in Tokyo?")]}
+result = workflow.invoke(initial)
+print(result["messages"][-1].content)
+# Output: "The current temperature in Tokyo is 22.5°C."
+```
+
+### Complete Backend Code (with weather tool)
+
+```python
+# langraph_tool_backend.py (full)
+import os
+import requests
+from typing import TypedDict, List, Annotated
+import operator
+from dotenv import load_dotenv
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage, HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
+
+load_dotenv()
+
+# ---------- State ----------
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# ---------- Tools ----------
+search_tool = DuckDuckGoSearchRun()
+
+@tool
+def calculator(first_number: float, second_number: float, operation: str) -> float:
+    """Perform basic arithmetic operations: add, subtract, multiply, divide."""
+    if operation == "add":
+        return first_number + second_number
+    elif operation == "subtract":
+        return first_number - second_number
+    elif operation == "multiply":
+        return first_number * second_number
+    elif operation == "divide":
+        return first_number / second_number
+    else:
+        raise ValueError("Invalid operation")
+
+@tool
+def get_stock_price(symbol: str) -> dict:
+    """Get current stock price for a given company symbol (e.g., AAPL)."""
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
+    return requests.get(url).json()
+
+@tool
+def get_weather(city: str) -> str:
+    """Get current temperature in Celsius for a given city."""
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        temp = data['main']['temp']
+        return f"The current temperature in {city} is {temp}°C."
+    else:
+        return f"Could not fetch weather for {city}."
+
+tools = [search_tool, calculator, get_stock_price, get_weather]
+
+# ---------- LLM ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(tools)
+
+# ---------- Nodes ----------
+def chat_node(state: AgentState) -> dict:
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+# ---------- Graph ----------
+graph = StateGraph(AgentState)
+graph.add_node("chat_node", chat_node)
+tool_node = ToolNode(tools)
+graph.add_node("tools", tool_node)
+
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,
+    {
+        "tools": "tools",
+        "__end__": END
+    }
+)
+graph.add_edge("tools", "chat_node")
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# ---------- Optional: test ----------
+if __name__ == "__main__":
+    from langchain_core.messages import HumanMessage
+    config = {"configurable": {"thread_id": "test"}}
+    result = chatbot.invoke(
+        {"messages": [HumanMessage(content="What is the weather in London?")]},
+        config=config
+    )
+    print(result["messages"][-1].content)
+```
+
+### Frontend Changes (Filter Tool Messages)
+
+In `streamlit_frontend.py`, replace the streaming generator with:
+
+```python
+from langchain_core.messages import AIMessage, ToolMessage
+
+def token_generator():
+    stream = chatbot.stream(input_state, config=CONFIG, stream_mode="messages")
+    for msg_chunk, metadata in stream:
+        if isinstance(msg_chunk, AIMessage) and msg_chunk.content:
+            yield msg_chunk.content
+```
+
+---
+
+## 6. Key Takeaways
+
+- **Tools turn your chatbot from a passive talker into an active doer.**
+- **LangGraph’s `ToolNode` and `tools_condition` simplify the wiring.**
+- **The LLM–Tool loop is essential for multi‑step reasoning.**
+- **Always provide clear tool docstrings** – the LLM uses them to decide when and how to call tools.
+- **Filter streaming output** to show only AI messages, not raw tool outputs.
+- **Use `st.status()`** for a polished UX showing tool usage.
+
+---
+
+## 019. How to build MCP Client using LangGraph (44:30)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
