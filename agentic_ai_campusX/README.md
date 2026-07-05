@@ -8973,5 +8973,408 @@ def token_generator():
 
 ## 019. How to build MCP Client using LangGraph (44:30)
 
+This tutorial introduces **MCP (Model Context Protocol)** as a **superior alternative to the traditional "tools" approach**, demonstrates the **brittleness problem** of traditional tools, and shows how to build an **MCP client** in LangGraph that connects to both **local and remote MCP servers**.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **The "Tools" problem** | When you write custom tools for your chatbot (e.g., GitHub API, Slack, Gmail), **any change in the external API breaks your client code**. You must update every tool in every chatbot, creating an **n × m maintenance nightmare**. |
+| 2 | **MCP solves this** | MCP separates **client** (chatbot) from **server** (tool implementation). The client only needs a **configuration** (server URL/command). The server handles all the complex logic. |
+| 3 | **Server-side changes don't affect clients** | If the GitHub API changes, only the MCP server needs updating. The client’s config code stays exactly the same. |
+| 4 | **MCP is a standardized protocol** | It defines how LLM applications (clients) communicate with tool servers, making integration plug‑and‑play. |
+| 5 | **LangGraph + MCP requires async** | The MCP libraries are **async‑only**. We must convert our synchronous LangGraph code to async (using `async def` and `await`). |
+| 6 | **MCP Client in LangGraph** | Use `langchain-mcp-adapters` library and the `MultiServerMCPClient` class. Each server is configured with a `transport` (stdio for local, sse/http for remote) and a `command`/`url`. |
+| 7 | **Getting tools from MCP server** | Use `await client.get_tools()` to fetch all tool definitions from the server. Bind them to the LLM with `llm.bind_tools(tools)`. |
+| 8 | **Adding multiple servers** | The `MultiServerMCPClient` supports **multiple servers** – just add more entries to the `servers` dict. |
+| 9 | **No client-side code for new features** | When you add a new tool to the MCP server, the client automatically discovers and uses it – **zero code changes** on the client side. |
+| 10 | **Challenge with Streamlit** | Streamlit is fundamentally synchronous, making async MCP integration tricky. A better approach is using FastAPI + React/Next.js for production. |
+| 11 | **Database must also be async** | When converting to async, your database (e.g., SQLite) must also support async operations – use `aiosqlite` instead of `sqlite3`. |
+
+---
+
+## 1. The Problem with Traditional Tools – Brittleness
+
+### Scenario: Adding GitHub Integration
+
+You have a chatbot with 3 tools (search, calculator, stock price). Your manager asks you to add GitHub integration so developers can query pull requests, commits, etc.
+
+**Traditional approach:**
+- You write a custom Python function that calls the GitHub REST API.
+- You parse the JSON response and extract fields like `title`, `user`, `state`, `url`.
+
+```python
+@tool
+def get_github_prs(owner: str, repo: str, state: str = "open", per_page: int = 5) -> str:
+    """Get list of pull requests from a GitHub repository."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    # ... API call, parse JSON, extract fields ...
+    return formatted_prs
+```
+
+### What happens when GitHub updates its API?
+
+GitHub releases **API v2.0** with breaking changes:
+- The endpoint changes from `/repos/{owner}/{repo}/pulls` to `/repos/{owner}/{repo}/pull-requests`.
+- The field `title` becomes `title_name`.
+- The field `user` becomes `user_name`.
+
+**Result:** Your code breaks. You must:
+1. Read GitHub’s new documentation.
+2. Update the URL.
+3. Update all field names.
+4. Do this for **every tool** that touches GitHub.
+5. Repeat for **every chatbot** in your company (if you have multiple).
+
+**The n × m maintenance problem:**
+- `n` tools × `m` chatbots = huge maintenance headache.
+
+---
+
+## 2. MCP Solution – Separation of Concerns
+
+### Architecture
+
+```
+┌─────────────────┐          ┌──────────────────────┐
+│   Chatbot       │   MCP    │   MCP Server         │
+│   (Client)      │─────────▶│   (Tool Provider)    │
+│                  │          │                      │
+│  Config only:    │          │  All tool logic:     │
+│  - server URL    │          │  - GitHub API calls  │
+│  - transport     │          │  - Slack API         │
+└─────────────────┘          │  - Gmail API         │
+                             │  - etc.              │
+                             └──────────────────────┘
+```
+
+**Key principle:**
+- **Server** = where all tool logic lives (complex code).
+- **Client** = only needs a configuration to connect.
+- If the GitHub API changes, **only the server needs updating** – the client config stays the same.
+
+### Client Configuration Code (vs. writing the full tool)
+
+**Without MCP (writing the full tool):**
+```python
+@tool
+def get_github_prs(owner, repo, state="open", per_page=5):
+    # 30+ lines of code: API call, error handling, parsing, formatting
+    ...
+```
+
+**With MCP (client config only):**
+```python
+client = MultiServerMCPClient({
+    "github": {
+        "transport": "stdio",  # or "sse" for remote
+        "command": "python /path/to/github_mcp_server.py"
+    }
+})
+tools = await client.get_tools()   # auto‑discovers all tools
+```
+
+**No tool code on the client side!** The server provides the tool definitions and implementations.
+
+---
+
+## 3. Async Conversion – Why and How
+
+### Why MCP Requires Async
+
+The MCP libraries (`langchain-mcp-adapters`, `mcp`) are **async‑only**. They use `asyncio` for non‑blocking communication with servers.
+
+### Converting Synchronous LangGraph to Async
+
+**Before (synchronous):**
+```python
+def chat_node(state):
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+graph = StateGraph(State)
+graph.add_node("chat_node", chat_node)
+# ...
+```
+
+**After (async):**
+```python
+async def chat_node(state):
+    response = await llm.ainvoke(state["messages"])
+    return {"messages": [response]}
+
+# Node is added the same way
+graph.add_node("chat_node", chat_node)
+```
+
+**Key changes:**
+1. Node functions become `async def`.
+2. Use `await llm.ainvoke()` (async version of `invoke`).
+3. The graph is compiled the same way – LangGraph supports both sync and async nodes.
+4. When executing, use `await graph.ainvoke()` instead of `invoke()`.
+
+### Full Async Main Function
+
+```python
+import asyncio
+
+async def main():
+    chatbot = build_graph()
+    config = {"configurable": {"thread_id": "test"}}
+    state = {"messages": [HumanMessage(content="What is 5 * 3?")]}
+    result = await chatbot.ainvoke(state, config=config)
+    print(result["messages"][-1].content)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Quick Note on Async Programming
+
+- **Synchronous:** Tasks run one after another. If you fetch weather and cricket scores, they run sequentially.
+- **Asynchronous:** Tasks can run in parallel. Weather and cricket scores are fetched simultaneously, making the app faster.
+
+---
+
+## 4. Building an MCP Client in LangGraph
+
+### Step 1: Install Required Library
+
+```bash
+pip install langchain-mcp-adapters
+# or with uv
+uv add langchain-mcp-adapters
+```
+
+### Step 2: Import the Client
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+```
+
+### Step 3: Define the Client Configuration
+
+**For a local MCP server (stdio transport):**
+
+```python
+client = MultiServerMCPClient({
+    "math-server": {
+        "transport": "stdio",
+        "command": "python",
+        "args": ["/path/to/math_mcp_server.py"]
+    }
+})
+```
+
+**For a remote MCP server (SSE/HTTP transport):**
+
+```python
+client = MultiServerMCPClient({
+    "expense-tracker": {
+        "transport": "sse",
+        "url": "https://expense-tracker-mcp.example.com/sse"
+    }
+})
+```
+
+### Step 4: Fetch Tools from the Server
+
+```python
+# Inside an async function
+tools = await client.get_tools()
+print(f"Discovered {len(tools)} tools: {[t.name for t in tools]}")
+```
+
+### Step 5: Bind Tools to LLM
+
+```python
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(tools)
+```
+
+### Step 6: Define the Chat Node (Async)
+
+```python
+async def chat_node(state):
+    response = await llm_with_tools.ainvoke(state["messages"])
+    return {"messages": [response]}
+```
+
+### Step 7: Build the Graph with ToolNode
+
+```python
+from langgraph.prebuilt import ToolNode, tools_condition
+
+tool_node = ToolNode(tools)
+
+graph = StateGraph(State)
+graph.add_node("chat_node", chat_node)
+graph.add_node("tools", tool_node)
+
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,
+    {"tools": "tools", "__end__": END}
+)
+graph.add_edge("tools", "chat_node")  # loop back to LLM
+
+chatbot = graph.compile()
+```
+
+---
+
+## 5. Full Working Example
+
+```python
+import asyncio
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_openai import ChatOpenAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from typing import TypedDict, List, Annotated
+from langchain_core.messages import BaseMessage, HumanMessage
+import operator
+
+# ---------- State ----------
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# ---------- LLM ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+# ---------- Async Node ----------
+async def chat_node(state: AgentState):
+    response = await llm_with_tools.ainvoke(state["messages"])
+    return {"messages": [response]}
+
+# ---------- Main Function ----------
+async def main():
+    # 1. Create MCP client with multiple servers
+    client = MultiServerMCPClient({
+        "math-server": {
+            "transport": "stdio",
+            "command": "python",
+            "args": ["/home/user/mcp_servers/math_server.py"]
+        },
+        "expense-tracker": {
+            "transport": "sse",
+            "url": "https://expense-tracker-mcp.example.com/sse"
+        }
+    })
+    
+    # 2. Fetch all tools from all servers
+    tools = await client.get_tools()
+    print("Available tools:", [t.name for t in tools])
+    
+    # 3. Bind tools to LLM
+    global llm_with_tools
+    llm_with_tools = llm.bind_tools(tools)
+    
+    # 4. Build graph
+    tool_node = ToolNode(tools)
+    graph = StateGraph(AgentState)
+    graph.add_node("chat_node", chat_node)
+    graph.add_node("tools", tool_node)
+    
+    graph.add_edge(START, "chat_node")
+    graph.add_conditional_edges(
+        "chat_node",
+        tools_condition,
+        {"tools": "tools", "__end__": END}
+    )
+    graph.add_edge("tools", "chat_node")
+    
+    chatbot = graph.compile()
+    
+    # 5. Test
+    config = {"configurable": {"thread_id": "test"}}
+    state = {"messages": [HumanMessage(content="What is 5 * 3?")]}
+    result = await chatbot.ainvoke(state, config=config)
+    print("Response:", result["messages"][-1].content)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+## 6. Key Benefits Demonstrated
+
+### Benefit 1: No Client-Side Code for New Tools
+
+The expense tracker MCP server has 3 tools (add expense, list expenses, summarise). The client code **did not change** at all – it just discovered the tools automatically via `client.get_tools()`.
+
+### Benefit 2: API Changes Don't Affect Clients
+
+If the expense tracker server updates its internal logic or database schema, the client’s configuration remains the same. The client only cares about the **MCP protocol** and the **tool names/definitions**, not the implementation.
+
+### Benefit 3: Mix and Match Tools and MCP
+
+You can use **both** traditional tools and MCP tools together:
+
+```python
+# Traditional tool
+@tool
+def get_stock_price(symbol: str) -> dict:
+    ...
+
+# MCP tools
+mcp_tools = await mcp_client.get_tools()
+
+# Combine
+all_tools = [get_stock_price] + mcp_tools
+llm_with_tools = llm.bind_tools(all_tools)
+```
+
+---
+
+## 7. Challenge: Integrating with Streamlit
+
+**Problem:** Streamlit is fundamentally **synchronous**. MCP libraries are **async‑only**.
+
+**Solution (Hacky):**
+- Convert the entire Streamlit app to use `asyncio.run()`.
+- Use `async for` in the streaming loop.
+- Change SQLite to `aiosqlite` (async version).
+
+**Better Production Approach:**
+- Use **FastAPI** for the backend (async‑friendly).
+- Use **React** or **Next.js** for the frontend (natively async).
+- Streamlit is not ideal for production MCP integration.
+
+---
+
+## 8. Summary Comparison
+
+| Aspect | Traditional Tools | MCP (Model Context Protocol) |
+|--------|-------------------|------------------------------|
+| **Implementation** | Write custom Python functions for each API | Write configuration to connect to MCP server |
+| **Maintenance** | Each API change requires updating every client | Only the server needs updating |
+| **Scalability** | n × m maintenance problem (n tools × m chatbots) | Linear – add servers independently |
+| **Code on client side** | Full implementation code (API calls, parsing, formatting) | Only configuration (server URL/command) |
+| **Discoverability** | Manual – you must know which tools exist | Automatic – `client.get_tools()` lists all available tools |
+| **Async support** | Optional | Required (MCP libraries are async‑only) |
+| **Production readiness** | Good for small projects | Industry standard (used by ChatGPT, Claude, etc.) |
+
+---
+
+## 9. Key Takeaways
+
+- **MCP is a standardized protocol** for connecting LLM applications (clients) to tool servers.
+- **The biggest benefit** is **separation of concerns** – server handles complexity, client just configures.
+- **MCP eliminates the n × m maintenance problem** – one server update serves all clients.
+- **LangGraph supports MCP** via `langchain-mcp-adapters` and `MultiServerMCPClient`.
+- **MCP requires async** – convert your LangGraph code to async using `async def` and `await`.
+- **You can mix tools and MCP** – use both approaches together.
+- **Streamlit is not ideal** for MCP integration – consider FastAPI + React/Next.js for production.
+- **The future is MCP** – even ChatGPT and Claude are adopting this standard.
+
+---
+
+## 020. RAG using LangGraph | Agentic AI using LangGraph (37:11)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
