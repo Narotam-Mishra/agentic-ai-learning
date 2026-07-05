@@ -79,6 +79,59 @@ def get_weather_data(city: str) -> str:
   return response.json()
 
 
+@tool
+def list_github_prs(
+    owner: str,
+    repo: str,
+    state: str = "open",
+    per_page: int = 5,
+) -> list[dict]:
+    """List the latest pull requests for a GitHub repository.
+
+    Args:
+        owner: GitHub organization or username (for example, ``langgraph-ai``).
+        repo: Repository name (for example, ``langgraph``).
+        state: Pull request state: ``open``, ``closed``, or ``all``.
+        per_page: Number of pull requests to fetch, from 1 to 100.
+
+    Returns:
+        A simplified list containing each pull request's number, title,
+        author, state, and URL.
+    """
+    if state not in {"open", "closed", "all"}:
+        raise ValueError("state must be 'open', 'closed', or 'all'")
+    if not 1 <= per_page <= 100:
+        raise ValueError("per_page must be between 1 and 100")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    response = requests.get(
+        url,
+        headers=headers,
+        params={"state": state, "per_page": per_page, "sort": "created", "direction": "desc"},
+        timeout=10,
+    )
+    response.raise_for_status()
+
+    return [
+        {
+            "number": pr["number"],
+            "title": pr["title"],
+            "author": pr["user"]["login"],
+            "state": pr["state"],
+            "url": pr["html_url"],
+        }
+        for pr in response.json()
+    ]
+
+
 # tools setup
 tools = [search_tool, calculator, get_stock_price, get_weather_data]
 llm_with_tools = llm.bind_tools(tools)
