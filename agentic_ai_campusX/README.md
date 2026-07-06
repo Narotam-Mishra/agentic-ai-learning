@@ -9376,5 +9376,360 @@ llm_with_tools = llm.bind_tools(all_tools)
 
 ## 020. RAG using LangGraph | Agentic AI using LangGraph (37:11)
 
+This tutorial covers how to **convert a simple LangGraph chatbot into a RAG (Retrieval-Augmented Generation) chatbot** that can answer questions based on uploaded documents. It includes:
+
+- **Why RAG is needed** (outdated knowledge, private data, hallucination reduction).
+- **RAG architecture** (split → embed → store → retrieve → generate).
+- A **standalone RAG chatbot** in LangGraph (using a PDF, embeddings, FAISS, and a RAG tool).
+- **LangSmith tracing** to visualise the step‑by‑step flow.
+- **Integration** into the existing chatbot project with a file upload UI.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **RAG (Retrieval-Augmented Generation)** | A technique that provides the LLM with **relevant context** from external documents **at query time** (in‑context learning). |
+| 2 | **Why RAG matters** | Solves **outdated knowledge** (LLMs have a cutoff date), **private data** (company/personal docs), and **hallucinations** (grounding responses). |
+| 3 | **RAG pipeline steps** | **Load** documents → **Split** into chunks → **Embed** each chunk (vector) → **Store** in a vector database → **Retrieve** top‑k similar chunks for a query → **Generate** answer using LLM with context. |
+| 4 | **Key components** | `PyPDFLoader` (load PDF), `RecursiveCharacterTextSplitter` (chunking), `OpenAIEmbeddings` (embedding), `FAISS` (vector store), `retriever` (search). |
+| 5 | **RAG as a Tool** | The most common pattern in LangGraph is to **wrap the retriever as a tool** and treat it like any other tool (search, calculator, etc.). |
+| 6 | **LangGraph architecture** | `START → chat_node → (conditional) → tool_node (RAG) → chat_node → END` – the loop allows the LLM to see the retrieved context and generate a grounded answer. |
+| 7 | **LangSmith tracing** | Shows the entire flow: user query → LLM decides to call RAG tool → retriever fetches chunks → context passed back → final answer generated. |
+| 8 | **Existing project integration** | New backend file with `ingest_pdf()` function, frontend file with file upload in sidebar, and minor thread/stream handling adjustments. |
+
+---
+
+## 1. Why RAG is Needed
+
+| Problem | Explanation | RAG Solution |
+|---------|-------------|--------------|
+| **Outdated knowledge** | LLMs have a knowledge cutoff date; they don't know recent events. | RAG retrieves up‑to‑date information from external sources. |
+| **Private data** | LLMs haven't seen your personal or company documents. | RAG allows you to upload your own documents and ask questions about them. |
+| **Hallucinations** | LLMs can generate false information with confidence. | RAG grounds the LLM's answer in the provided context; if the context doesn't contain the answer, the LLM can say "I don't know." |
+
+---
+
+## 2. RAG Pipeline – Step by Step
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      RAG PIPELINE                              │
+├─────────────────────────────────────────────────────────────────┤
+│  1. LOAD    → 2. SPLIT   → 3. EMBED   → 4. STORE   → 5. RETRIEVE → 6. GENERATE
+│  (PDF)       (chunks)     (vectors)    (vector DB)  (query)      (LLM + context)
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Load the Document
+
+```python
+from langchain_community.document_loaders import PyPDFLoader
+
+loader = PyPDFLoader("intro_to_ml.pdf")
+documents = loader.load()
+```
+
+### Step 2: Split into Chunks
+
+```python
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,      # characters per chunk
+    chunk_overlap=150     # overlap between chunks (preserve context)
+)
+chunks = splitter.split_documents(documents)
+```
+
+### Step 3 & 4: Embed and Store in Vector Database
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vectorstore = FAISS.from_documents(chunks, embeddings)   # embeds and stores
+retriever = vectorstore.as_retriever(
+    search_type="similarity",   # semantic similarity search
+    search_kwargs={"k": 4}      # return top‑4 most similar chunks
+)
+```
+
+### Step 5: Retrieve for a Query
+
+```python
+query = "What is a decision tree?"
+retrieved_docs = retriever.invoke(query)
+# Returns 4 document objects with content and metadata
+```
+
+### Step 6: Generate Answer (LLM + Context)
+
+```python
+context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+prompt = f"""
+Answer the question based only on the following context.
+If the answer is not in the context, say "I don't know."
+
+Context: {context}
+Question: {query}
+"""
+response = llm.invoke(prompt)
+```
+
+---
+
+## 3. Building a RAG Chatbot in LangGraph
+
+### Step 1: Complete the Indexing Pipeline (Load → Split → Embed → Store → Retriever)
+
+```python
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+# 1. Load
+loader = PyPDFLoader("intro_to_ml.pdf")
+docs = loader.load()
+
+# 2. Split
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+chunks = splitter.split_documents(docs)
+
+# 3 & 4. Embed and store
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vectorstore = FAISS.from_documents(chunks, embeddings)
+
+# 5. Create retriever
+retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+```
+
+### Step 2: Wrap Retriever as a Tool
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def rag_tool(query: str) -> str:
+    """
+    Use this tool to answer questions based on the uploaded PDF document.
+    The input should be a specific question about the document content.
+    """
+    retrieved_docs = retriever.invoke(query)
+    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+    metadata = [doc.metadata for doc in retrieved_docs]
+    return {
+        "query": query,
+        "context": context,
+        "metadata": metadata
+    }
+```
+
+**Why the docstring matters:** The LLM reads this description to understand when and how to use the tool.
+
+### Step 3: Bind Tool to LLM and Build Graph
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from typing import TypedDict, List, Annotated
+from langchain_core.messages import BaseMessage, HumanMessage
+import operator
+
+# State
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# LLM
+llm = ChatOpenAI(model="gpt-4o-mini")
+tools = [rag_tool]
+llm_with_tools = llm.bind_tools(tools)
+
+# Nodes
+def chat_node(state: AgentState) -> dict:
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+# Graph
+graph = StateGraph(AgentState)
+graph.add_node("chat_node", chat_node)
+graph.add_node("tools", ToolNode(tools))
+
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,
+    {"tools": "tools", "__end__": END}
+)
+graph.add_edge("tools", "chat_node")   # loop back to LLM
+
+chatbot = graph.compile()
+```
+
+### Step 4: Run a Query
+
+```python
+initial_state = {"messages": [HumanMessage(content="Using the PDF notes, explain how to find the ideal value of K in K-Nearest Neighbors.")]}
+result = chatbot.invoke(initial_state)
+print(result["messages"][-1].content)
+```
+
+**What happens behind the scenes:**
+1. User query goes to `chat_node`.
+2. LLM decides it needs the `rag_tool`.
+3. Control goes to `tools` node.
+4. `rag_tool` calls the retriever, gets top‑4 chunks, and returns context + metadata.
+5. Control loops back to `chat_node`.
+6. LLM now has the context and the original query → generates a grounded answer.
+
+---
+
+## 4. LangSmith Tracing – Visualising the Flow
+
+When you open the trace in LangSmith, you see the **three‑step execution**:
+
+| Step | Component | What Happens |
+|------|-----------|--------------|
+| 1 | `chat_node` (first call) | User query → LLM decides to call `rag_tool`. Output: tool call with query. |
+| 2 | `tools` node | `rag_tool` invokes retriever → returns 4 retrieved document chunks. |
+| 3 | `chat_node` (second call) | LLM receives original query + retrieved context → generates final answer. |
+
+**Why this is useful for debugging:**
+- You can see **exactly what the retriever returned**.
+- You can see the **final prompt** (context + query).
+- You can verify that the LLM used only the provided context.
+
+---
+
+## 5. Complete Standalone Code
+
+```python
+# rag_chatbot.ipynb
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from typing import TypedDict, List, Annotated
+from langchain_core.messages import BaseMessage, HumanMessage
+import operator
+
+# ---------- 1. Indexing Pipeline ----------
+loader = PyPDFLoader("intro_to_ml.pdf")
+docs = loader.load()
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+chunks = splitter.split_documents(docs)
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+vectorstore = FAISS.from_documents(chunks, embeddings)
+retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+
+# ---------- 2. RAG Tool ----------
+@tool
+def rag_tool(query: str) -> str:
+    """
+    Use this tool to answer questions based on the uploaded PDF document.
+    Provide a specific question about the document content.
+    """
+    docs = retriever.invoke(query)
+    context = "\n\n".join([d.page_content for d in docs])
+    return context
+
+# ---------- 3. LLM and Graph ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+tools = [rag_tool]
+llm_with_tools = llm.bind_tools(tools)
+
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+def chat_node(state: AgentState) -> dict:
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+graph = StateGraph(AgentState)
+graph.add_node("chat_node", chat_node)
+graph.add_node("tools", ToolNode(tools))
+
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,
+    {"tools": "tools", "__end__": END}
+)
+graph.add_edge("tools", "chat_node")
+
+chatbot = graph.compile()
+
+# ---------- 4. Run ----------
+query = "Using the PDF notes, explain how to split a node in a decision tree."
+initial_state = {"messages": [HumanMessage(content=query)]}
+result = chatbot.invoke(initial_state)
+print(result["messages"][-1].content)
+```
+
+**Output:**
+```
+To split a node in a decision tree, the algorithm follows a recursive process...
+```
+
+---
+
+## 6. Integration into the Existing Chatbot Project
+
+### Backend Changes (`langraph_rag_backend.py`)
+
+| Change | Description |
+|--------|-------------|
+| New function `ingest_pdf()` | Loads PDF, splits, embeds, creates retriever. |
+| `rag_tool` uses the retriever | Wrapped as a LangChain tool. |
+| Combined with existing tools | `tools = [search_tool, calculator, get_stock_price, rag_tool]` |
+| Async support | The project already uses async (MCP integration from previous video). |
+
+### Frontend Changes (`streamlit_rag_frontend.py`)
+
+| Change | Description |
+|--------|-------------|
+| File uploader in sidebar | `st.sidebar.file_uploader("Upload PDF", type=["pdf"])` |
+| Thread handling | Each uploaded file gets a new thread (or updates the current one). |
+| Streaming filter | Tool messages are not displayed; only AI messages are streamed. |
+
+**Key UI snippet:**
+
+```python
+# In sidebar
+uploaded_file = st.sidebar.file_uploader("Upload a PDF", type=["pdf"])
+if uploaded_file:
+    # Save file, call backend to ingest
+    file_path = f"uploads/{uploaded_file.name}"
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    st.sidebar.success("File uploaded and indexed!")
+```
+
+---
+
+## 7. Key Takeaways
+
+- **RAG = Retriever + Generator** – retrieve relevant context, then generate an answer grounded in that context.
+- **LangGraph + RAG is straightforward** – wrap the retriever as a **tool** and use the same tool‑calling loop as with other tools.
+- **The LLM decides when to use RAG** – the LLM reads the tool description and calls it when needed.
+- **LangSmith is invaluable** – it shows exactly what the retriever returned, making debugging hallucinations or retrieval failures trivial.
+- **The architecture is reusable** – the same `chat_node → tools → chat_node` loop works for search, calculator, stock price, and RAG.
+
+---
+
+## 021. Human in the loop (HITL) using LangGraph (40:03)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
