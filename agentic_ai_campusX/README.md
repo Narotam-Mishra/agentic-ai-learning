@@ -9731,5 +9731,384 @@ if uploaded_file:
 
 ## 021. Human in the loop (HITL) using LangGraph (40:03)
 
+This tutorial covers **Human-in-the-Loop (HITL)** – a critical pattern in agentic AI systems where a human is brought into the workflow at key decision points to provide oversight, approval, or guidance. The video explains:
+
+- **What HITL is** and why it's necessary.
+- **Key reasons** for HITL (accuracy + accountability).
+- **Common HITL patterns** (action approval, output review, ambiguity clarification, escalation).
+- **How HITL is implemented in LangGraph** using `interrupt` and `resume` with checkpoints.
+- **Two practical examples**: a simple confirmation workflow and a tool‑based stock purchase chatbot with approval.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **HITL (Human-in-the-Loop)** | A design approach where a human actively participates at critical points of an AI workflow to supervise, approve, correct, or guide the model's output. |
+| 2 | **Why HITL exists** | Two primary reasons: **Accuracy** (LLMs are not perfect and can misinterpret or hallucinate) and **Accountability** (a human must be responsible for critical actions). |
+| 3 | **Common HITL patterns** | Action approval (confirm before executing), Output review (edit draft before posting), Ambiguity clarification (ask for clarification), Escalation (hand over to human when stuck). |
+| 4 | **LangGraph HITL mechanism** | Uses **`interrupt`** function (pauses execution, saves state via checkpointer) and **`resume` with `Command`** (continues execution from the same point with human input). |
+| 5 | **Checkpoint requirement** | HITL requires a checkpointer (`MemorySaver`, `PostgresSaver`) to save the state when execution is interrupted. |
+| 6 | **Multiple invocations** | With HITL, the graph is invoked multiple times – first to start, then again with the `Command` to resume. |
+| 7 | **Thread ID** | A unique identifier for a conversation/session. Required because checkpoints are stored per thread. |
+| 8 | **Interrupt message** | The `interrupt()` function returns a message that is sent to the frontend; the user's decision is passed back via `Command(resume=...)`. |
+
+---
+
+## 1. What is Human-in-the-Loop (HITL)?
+
+> **HITL is a design approach in AI systems where a human actively participates at critical points of the AI workflow to supervise, approve, correct, and guide the model's output.**
+
+Think of HITL as **putting a human checkpoint inside an AI pipeline** so that important decisions are not made autonomously by the model.
+
+**Simple analogy:** When you book a flight online, an AI might find the best options, but **you** (the human) make the final decision to pay. That's HITL.
+
+---
+
+## 2. Why HITL Exists – Two Core Reasons
+
+### Reason 1: Accuracy (LLMs are not perfect)
+
+- LLMs can **misinterpret** user intent (e.g., "next Friday" – this week or next week?).
+- LLMs can **hallucinate** (generate false information confidently).
+- LLMs can struggle with **ambiguity** in user queries.
+
+**Example:** A user says, *"Book flight tickets for next Friday."* The system could interpret this as either this Friday or next Friday. Instead of guessing, HITL lets the AI ask: *"Do you mean this Friday or next Friday?"*
+
+### Reason 2: Accountability
+
+- AI systems cannot take responsibility for mistakes.
+- A **human** must be accountable for critical actions (financial transactions, data deletion, sensitive communications).
+
+**Example:** An AI generates and sends a reply email automatically. If the reply contains errors or sensitive information, the company cannot blame the AI – they need a human to review and approve before sending.
+
+---
+
+## 3. Common HITL Patterns
+
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| **Action Approval** | AI proposes an action; human approves/rejects before execution. | "Approve payment of ₹10,000?" |
+| **Output Review / Edit** | AI generates a draft; human reviews and edits before publishing. | "Review this tweet draft before posting." |
+| **Ambiguity Clarification** | AI detects ambiguity and asks human for clarification. | "Did you mean this Friday or next Friday?" |
+| **Escalation** | AI hands over the task to a human when it cannot handle it. | "Would you like to speak to a human agent?" |
+
+---
+
+## 4. How HITL Works in LangGraph
+
+### The Core Mechanism: `interrupt` + `Command(resume=...)`
+
+1. **Normal execution** starts – the graph runs node by node.
+2. When the graph reaches a node with `interrupt()`, execution **pauses**.
+3. The **current state** is **saved** via the checkpointer (using the `thread_id`).
+4. An **interrupt message** (prepared in `interrupt()`) is sent to the frontend.
+5. The frontend displays the message to the human and collects their input.
+6. The graph is **invoked again** – but this time with a **`Command(resume=human_input)`**.
+7. LangGraph **loads the saved state** from the checkpoint and **resumes execution** from the interrupted node.
+8. The node receives the human input (via `resume`) and continues execution.
+
+### Key Functions
+
+```python
+# Inside a node – pause execution and ask for human input
+decision = interrupt({
+    "type": "approval",
+    "question": "Do you approve this?",
+    "instructions": "Type 'yes' or 'no'"
+})
+# Execution pauses here until the graph is resumed with Command(resume=...)
+
+# After resume, 'decision' contains the human's response
+if decision == "yes":
+    # proceed with the action
+else:
+    # cancel the action
+```
+
+### Resuming Execution
+
+```python
+# On the frontend side, after collecting human input:
+human_decision = input("Approve? (yes/no): ")
+
+# Resume the graph with the human's decision
+result = graph.invoke(
+    None,  # No new state – we're resuming
+    config=config,  # Same thread_id
+    command=Command(resume=human_decision)
+)
+```
+
+---
+
+## 5. Basic HITL Example – Simple Confirmation Workflow
+
+### Scenario
+- User asks a question to the LLM.
+- Before sending the question, the system asks: *"Do you really want to ask this question?"*
+- If the user says **yes**, the LLM answers; if **no**, it says "Not approved."
+
+### Full Code
+
+```python
+import asyncio
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
+from langchain_openai import ChatOpenAI
+from typing import TypedDict, List, Annotated
+from langchain_core.messages import BaseMessage, HumanMessage
+import operator
+
+# ---------- State ----------
+class ChatState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# ---------- LLM ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+# ---------- Node with HITL ----------
+async def chat_node(state: ChatState) -> dict:
+    # 1. Interrupt: ask for human approval
+    decision = interrupt({
+        "type": "approval",
+        "question": state["messages"][-1].content,
+        "instructions": "Do you approve asking this question to the LLM? (yes/no)"
+    })
+    
+    # 2. If human says no, return "Not approved"
+    if decision.get("approved") == "no":
+        return {"messages": [AIMessage(content="Not approved. Question not sent to LLM.")]}
+    
+    # 3. If human says yes, send to LLM
+    response = await llm.ainvoke(state["messages"])
+    return {"messages": [response]}
+
+# ---------- Build Graph ----------
+graph = StateGraph(ChatState)
+graph.add_node("chat_node", chat_node)
+graph.add_edge(START, "chat_node")
+graph.add_edge("chat_node", END)
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# ---------- Run with HITL ----------
+async def main():
+    thread_id = "session_1"
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    # First invocation: starts execution, pauses at interrupt
+    initial_state = {"messages": [HumanMessage(content="Explain gradient descent in simple terms")]}
+    result = await chatbot.ainvoke(initial_state, config=config)
+    
+    # Extract interrupt message
+    interrupt_data = result.get("__interrupt__")[0].value
+    print("AI asks:", interrupt_data["instructions"])
+    print("Question:", interrupt_data["question"])
+    
+    # Get human input
+    human_decision = input("Your decision (yes/no): ")
+    
+    # Resume with human decision
+    final = await chatbot.ainvoke(
+        None,  # No new state
+        config=config,
+        command=Command(resume={"approved": human_decision})
+    )
+    print("Final response:", final["messages"][-1].content)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Output when human says "no":**
+```
+AI asks: Do you approve asking this question to the LLM? (yes/no)
+Question: Explain gradient descent in simple terms
+Your decision (yes/no): no
+Final response: Not approved. Question not sent to LLM.
+```
+
+**Output when human says "yes":**
+```
+AI asks: Do you approve asking this question to the LLM? (yes/no)
+Question: Explain gradient descent in simple terms
+Your decision (yes/no): yes
+Final response: Gradient descent is an optimization algorithm...
+```
+
+---
+
+## 6. Advanced HITL Example – Stock Purchase Chatbot with Tools
+
+### Scenario
+- A chatbot has two tools: **get_stock_price** (safe) and **purchase_stocks** (risky – requires approval).
+- When the user asks to purchase stocks, the system **interrupts** and asks for human approval before executing.
+
+### Tool Definition with HITL
+
+```python
+from langchain_core.tools import tool
+from langgraph.types import interrupt, Command
+
+@tool
+def purchase_stocks(company: str, quantity: int) -> str:
+    """
+    Purchase stocks of a given company.
+    Use this tool when the user explicitly asks to buy shares.
+    """
+    # Interrupt: ask for human approval before purchasing
+    decision = interrupt({
+        "type": "approval",
+        "company": company,
+        "quantity": quantity,
+        "message": f"Approve buying {quantity} shares of {company}?"
+    })
+    
+    # If human says no, cancel the purchase
+    if isinstance(decision, str) and decision.lower() == "no":
+        return f"Purchase of {quantity} shares of {company} was cancelled."
+    
+    # If human says yes, proceed
+    if isinstance(decision, str) and decision.lower() == "yes":
+        # In a real system, this would call a payment API
+        return f"Successfully purchased {quantity} shares of {company}."
+    
+    return "Invalid decision. Purchase cancelled."
+```
+
+### Graph Setup and Frontend Loop
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+# Tools
+tools = [get_stock_price, purchase_stocks]
+
+# LLM with tools
+llm = ChatOpenAI(model="gpt-4o-mini")
+llm_with_tools = llm.bind_tools(tools)
+
+# State
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+
+# Nodes
+def chat_node(state: AgentState) -> dict:
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+# Graph
+graph = StateGraph(AgentState)
+graph.add_node("chat_node", chat_node)
+graph.add_node("tools", ToolNode(tools))
+
+graph.add_edge(START, "chat_node")
+graph.add_conditional_edges(
+    "chat_node",
+    tools_condition,
+    {"tools": "tools", "__end__": END}
+)
+graph.add_edge("tools", "chat_node")  # loop back
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# ---------- Frontend Loop with HITL ----------
+async def run_chatbot():
+    thread_id = "user_123"
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    print("Chatbot ready! Type 'exit' to quit.")
+    
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() == "exit":
+            break
+        
+        # First invocation
+        result = await chatbot.ainvoke(
+            {"messages": [HumanMessage(content=user_input)]},
+            config=config
+        )
+        
+        # Check if there's an interrupt (tool requires approval)
+        interrupt_data = result.get("__interrupt__")
+        
+        if interrupt_data:
+            # Extract and display the approval message
+            approval_msg = interrupt_data[0].value["message"]
+            print(f"\n🔔 {approval_msg}")
+            
+            # Get human decision
+            decision = input("Approve? (yes/no): ").strip().lower()
+            
+            # Resume with decision
+            final = await chatbot.ainvoke(
+                None,
+                config=config,
+                command=Command(resume=decision)
+            )
+            
+            # Display the final message
+            ai_msg = final["messages"][-1]
+            print(f"AI: {ai_msg.content}")
+        else:
+            # No interrupt – just display the response
+            ai_msg = result["messages"][-1]
+            print(f"AI: {ai_msg.content}")
+```
+
+### Sample Conversation
+
+```
+You: What is the stock price of Apple?
+AI: The current stock price of Apple is $278.50.
+
+You: Purchase 10 shares of Apple.
+🔔 Approve buying 10 shares of Apple?
+Approve? (yes/no): yes
+AI: Successfully purchased 10 shares of Apple.
+
+You: Purchase 50 shares of Google.
+🔔 Approve buying 50 shares of Google?
+Approve? (yes/no): no
+AI: Purchase of 50 shares of Google was cancelled.
+```
+
+---
+
+## 7. Key Takeaways
+
+- **HITL is essential** for systems that require accuracy and accountability – especially financial, healthcare, and enterprise applications.
+- **LangGraph implements HITL** via `interrupt()` (pause) and `Command(resume=...)` (continue with human input).
+- **Checkpointing is mandatory** – the state must be saved when execution is interrupted so it can be restored later.
+- **Thread IDs** separate different conversations/sessions when using checkpoints.
+- **The graph is invoked multiple times** – once to start, again to resume.
+- **The interrupt message** can contain arbitrary data (question, instructions, context) that the frontend displays to the human.
+- **The human's decision** is passed back via `Command(resume=...)`.
+
+---
+
+## 8. Comparison: Without HITL vs With HITL
+
+| Aspect | Without HITL | With HITL |
+|--------|--------------|-----------|
+| **Stock purchase** | Executed immediately, no confirmation. | Human must approve before execution. |
+| **Accountability** | AI cannot be blamed for mistakes. | Human takes responsibility for the decision. |
+| **Accuracy** | Potential errors from misinterpretation/hallucination. | Human oversight catches errors before they cause harm. |
+| **User control** | User has no control over actions. | User retains final decision-making power. |
+| **Implementation** | Single graph invocation. | Multiple invocations (start + resume). |
+
+---
+
+## 022. How to build Subgraphs in LangGraph (22:46)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
