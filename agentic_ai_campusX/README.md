@@ -10804,9 +10804,9 @@ STM **cannot** provide this because it is reset with every new conversation.
 
 ---
 
-# Detailed Summary: Long-Term Memory in GenAI Systems – Types, Architecture & Implementation
+## Long-Term Memory in GenAI Systems – Types, Architecture & Implementation
 
-This tutorial continues the memory discussion, diving into **Long-Term Memory (LTM)** – why it's needed, the three types of memory (episodic, semantic, procedural), the four-step architecture (creation → storage → retrieval → injection), the key challenges, and emerging tools and libraries that simplify implementation.
+This part of tutorial continues the memory discussion, diving into **Long-Term Memory (LTM)** – why it's needed, the three types of memory (episodic, semantic, procedural), the four-step architecture (creation → storage → retrieval → injection), the key challenges, and emerging tools and libraries that simplify implementation.
 
 ---
 
