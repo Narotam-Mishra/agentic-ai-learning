@@ -10469,8 +10469,6 @@ In LangSmith, subgraphs appear as **separate runs** inside the parent trace – 
 
 ## 023. LLMs Don’t Have Memory — So How Do They Remember? (57:43)
 
-# Detailed Summary: Memory in GenAI Systems – From Short-Term to Long-Term Memory
-
 This tutorial provides a **first‑principles foundation** on memory in GenAI systems. It starts from the fundamental nature of LLMs (stateless mathematical functions), explains **how short‑term memory works** (via conversation buffers and in‑context learning), and then explores the **three critical limitations** of short‑term memory that lead to the need for **long‑term memory**.
 
 ---
@@ -10805,6 +10803,349 @@ STM **cannot** provide this because it is reset with every new conversation.
 - **Long‑term memory** is the next frontier – enabling personal assistants that truly know their users and evolve with them.
 
 ---
+
+# Detailed Summary: Long-Term Memory in GenAI Systems – Types, Architecture & Implementation
+
+This tutorial continues the memory discussion, diving into **Long-Term Memory (LTM)** – why it's needed, the three types of memory (episodic, semantic, procedural), the four-step architecture (creation → storage → retrieval → injection), the key challenges, and emerging tools and libraries that simplify implementation.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Why LTM is needed** | Short-term memory (STM) is thread-scoped and cannot retain information across conversations. LTM stores information that survives a single conversation and remains useful for days, weeks, or months. |
+| 2 | **Three types of LTM** | **Episodic** – past events/experiences. **Semantic** – facts about user/system. **Procedural** – how to do things (strategies, rules, learned behaviours). |
+| 3 | **Episodic memory** | Answers "What happened in the past?" – helps improve current conversation by learning from past interactions. |
+| 4 | **Semantic memory** | Stores facts about the user (preferences, style) and the system (configurations, constraints). Most common and important type. |
+| 5 | **Procedural memory** | Stores strategies, rules, and learned behaviours – "how to do things" for a specific user or system. Enables agents to adapt and improve over time. |
+| 6 | **LTM architecture (4 steps)** | **Creation** → **Storage** → **Retrieval** → **Injection** |
+| 7 | **Creation** | During a conversation, identify which pieces of information are "worth remembering" beyond the current conversation. Extract memory candidates, filter noise, tag scope. |
+| 8 | **Storage** | Save the memory in a durable store (relational DB, key-value store, vector DB, text log) with appropriate identifiers and metadata. |
+| 9 | **Retrieval** | When a new conversation starts, search the memory store for relevant information. Retrieval is **selective, not exhaustive** – only bring the most relevant pieces. |
+| 10 | **Injection** | Retrieved memory is first added to short-term memory (conversation buffer), which becomes part of the prompt. LTM never directly interacts with the LLM. |
+| 11 | **Key challenges** | Identifying what to remember, real-time retrieval of relevant information, and orchestrating the entire complex system. |
+| 12 | **Emerging tools** | LangMem (LangChain family), MemZero, SuperMemory – platforms that provide memory layers for GenAI apps, handling creation, storage, and retrieval automatically. |
+| 13 | **Future direction** | Research is moving toward LLMs with **intrinsic memory** (e.g., Google's "Titans" transformer architecture), eliminating the need for external memory systems. |
+
+---
+
+## 1. Why We Need Long-Term Memory
+
+### The Short-Term Memory (STM) Problem
+
+STM is **thread-scoped** – it only exists within a single conversation. Once you start a new conversation, all information is lost.
+
+**What STM cannot do:**
+
+| Scenario | STM's Limitation |
+|----------|------------------|
+| **Personalisation** | "Remember I prefer Python over Java" – forgotten in a new conversation. |
+| **Learning over time** | You teach the LLM to use window functions in one conversation. In a new conversation, it suggests subqueries again. |
+| **Cross-thread reasoning** | "What did we discuss about project X last week?" – impossible. |
+| **Persistence across sessions** | Information is lost if the server restarts or the app closes. |
+
+### What Long-Term Memory (LTM) Should Provide
+
+1. **Store "special" information** – information that should survive a single conversation and remain useful for days, weeks, or months.
+2. **Be selective** – not all conversation data is stored; only the most important, stable, and reusable pieces are extracted and saved.
+
+**Examples of LTM-worthy information:**
+- User identity: "I am Nitish, a male Indian YouTuber and AI teacher."
+- User preferences: "I prefer Python over Java."
+- System behaviour: "Always explain things step-by-step to this user."
+- Past decisions: "We tried solution X last time and it failed."
+
+---
+
+## 2. Three Types of Long-Term Memory
+
+| Type | What It Stores | Example |
+|------|----------------|---------|
+| **Episodic** | Past events, experiences, what happened | "Last session, the user rejected solution X." "Our deployment credentials were incorrect." |
+| **Semantic** | Facts about the user and system | "User prefers Python." "User is a beginner." "System uses PostgreSQL." "Budget constraint is ₹10,000." |
+| **Procedural** | How to do things – strategies, rules, learned behaviours | "Always explain step-by-step to this user." "If tool X fails, retry with tool Y." "Preferred workflow for task Z is..." |
+
+### Code Examples: Representing Different Memory Types
+
+```python
+# Episodic Memory (past events)
+episodic_memory = {
+    "type": "episodic",
+    "event": "User rejected SQL subquery solution",
+    "timestamp": "2024-01-15 10:30",
+    "conversation_id": "conv_123",
+    "context": "User asked for optimised query; subquery was too slow"
+}
+
+# Semantic Memory (facts)
+semantic_memory = {
+    "type": "semantic",
+    "user_id": "user_456",
+    "facts": {
+        "preferred_language": "Python",
+        "skill_level": "beginner",
+        "location": "India",
+        "occupation": "software_engineer"
+    },
+    "system_facts": {
+        "database": "PostgreSQL",
+        "budget_limit": 10000,
+        "preferred_tools": ["tool_A", "tool_B"]
+    }
+}
+
+# Procedural Memory (how to do things)
+procedural_memory = {
+    "type": "procedural",
+    "user_id": "user_456",
+    "strategies": {
+        "sql_optimisation": "Use window functions instead of subqueries",
+        "debugging": "Always start with logs, then trace execution path",
+        "preferred_workflow": "Step-by-step explanation with examples"
+    }
+}
+```
+
+---
+
+## 3. How Long-Term Memory Works – The Four-Step Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     LONG-TERM MEMORY WORKFLOW                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  1. CREATION         2. STORAGE         3. RETRIEVAL    4. INJECTION │
+│  (Extract memory   →  (Save to DB      →  (Search for   →  (Add to  │
+│   from conversation)   with metadata)      relevant        STM /    │
+│                                            information)    prompt)  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Creation (Extract Memory from Conversation)
+
+During a conversation, the system identifies which pieces of information are "worth remembering" beyond the current conversation.
+
+**Sub-steps:**
+
+1. **Extract memory candidates** – scan user messages, model responses, and tool outputs.
+2. **Filter noise** – remove irrelevant or temporary information.
+3. **Determine scope** – is this user-level, app-level, or agent-level memory?
+4. **Decide action** – create new memory, update existing memory, or ignore.
+
+**Code example (conceptual):**
+
+```python
+def extract_memory_candidates(conversation):
+    """
+    Extract potential memory candidates from a conversation.
+    Returns a list of memory objects.
+    """
+    candidates = []
+    for message in conversation:
+        # Simple rule-based extraction (in practice, use LLM)
+        if "I prefer" in message.content or "I like" in message.content:
+            candidates.append({
+                "type": "semantic",
+                "fact": message.content,
+                "scope": "user_preference"
+            })
+        if "remember last time" in message.content or "previously" in message.content:
+            candidates.append({
+                "type": "episodic",
+                "event": message.content,
+                "scope": "conversation_history"
+            })
+        if "always" in message.content and "when" in message.content:
+            candidates.append({
+                "type": "procedural",
+                "strategy": message.content,
+                "scope": "user_workflow"
+            })
+    return candidates
+```
+
+### Step 2: Storage (Save with Metadata)
+
+After identifying what to remember, save it to a durable storage system with appropriate metadata for future retrieval.
+
+**Storage options:**
+
+| Storage Type | Best For | Example |
+|--------------|----------|---------|
+| Relational DB (SQL) | Structured facts, user profiles | PostgreSQL, SQLite |
+| Key-Value Store | Simple lookups | Redis, DynamoDB |
+| Vector DB (Embeddings) | Semantic search | Pinecone, FAISS, Chroma |
+| Text Log | Auditing, simple retrieval | Text files, JSON |
+
+**Code example (conceptual):**
+
+```python
+def store_memory(memory_object, storage_type="sql"):
+    """
+    Store memory with appropriate metadata for retrieval.
+    """
+    # Add metadata
+    memory_object["created_at"] = datetime.now()
+    memory_object["id"] = generate_uuid()
+    
+    if storage_type == "sql":
+        db.insert("memories", memory_object)
+    elif storage_type == "vector":
+        embedding = generate_embedding(memory_object["fact"])
+        vector_db.insert(embedding, memory_object)
+    elif storage_type == "key_value":
+        key_value_store.set(memory_object["id"], memory_object)
+```
+
+### Step 3: Retrieval (Search for Relevant Information)
+
+When a new conversation starts, the system searches the memory store for relevant information. **Retrieval is selective, not exhaustive** – only the most relevant pieces are brought back.
+
+**Sub-steps:**
+
+1. Examine current user input.
+2. Decide if memory is needed.
+3. Search the memory store.
+4. Extract a small, relevant subset.
+
+**Code example (conceptual):**
+
+```python
+def retrieve_relevant_memory(user_query, memory_store):
+    """
+    Search memory store for information relevant to the current query.
+    Returns only the most relevant pieces.
+    """
+    # Determine if memory is needed
+    if not needs_memory(user_query):
+        return []
+    
+    # Semantic search (using vector DB)
+    query_embedding = generate_embedding(user_query)
+    results = vector_db.similarity_search(query_embedding, top_k=3)
+    
+    # Or SQL search
+    # results = db.query("SELECT * FROM memories WHERE scope = 'user_preference'")
+    
+    return results
+```
+
+### Step 4: Injection (Add to Short-Term Memory / Prompt)
+
+**Critical rule:** Long-Term Memory never directly interacts with the LLM. It is first **injected into Short-Term Memory** (the conversation buffer), which then becomes part of the prompt.
+
+```
+LTM → Retrieved Memory → Added to STM (conversation buffer) → Sent to LLM in prompt
+```
+
+**Code example (conceptual):**
+
+```python
+def inject_into_conversation(current_messages, retrieved_memories):
+    """
+    Inject retrieved memories into the current conversation buffer.
+    """
+    # Add memories as system messages at the beginning
+    for memory in retrieved_memories:
+        system_message = {
+            "role": "system",
+            "content": f"Remembered: {memory['fact']}"
+        }
+        current_messages.insert(0, system_message)
+    
+    return current_messages
+```
+
+### Complete LTM Workflow Example
+
+```python
+class MemorySystem:
+    def __init__(self, memory_store):
+        self.store = memory_store
+    
+    def process_conversation_turn(self, user_message, conversation_id):
+        # 1. CREATION: Check if anything worth remembering
+        memory_candidates = self.extract_memory_candidates(user_message)
+        
+        for candidate in memory_candidates:
+            # 2. STORAGE: Save to memory store
+            self.store_memory(candidate)
+        
+        # 3. RETRIEVAL: Find relevant memories for this query
+        relevant_memories = self.retrieve_memories(user_message)
+        
+        # 4. INJECTION: Add to conversation context
+        enhanced_prompt = self.inject_memories(user_message, relevant_memories)
+        
+        return enhanced_prompt
+```
+
+---
+
+## 4. Key Challenges in Building Memory Systems
+
+| Challenge | Description |
+|-----------|-------------|
+| **Memory Creation** | Identifying what is worth remembering vs. what is noise. Which information will be useful days/weeks later? |
+| **Real-time Retrieval** | During a conversation, how do you quickly find the most relevant memories from potentially thousands of stored items? |
+| **Orchestration** | Building a complex agentic AI system while integrating a memory layer is engineering-heavy – many moving parts to coordinate. |
+| **Storage Choice** | Different memory types (episodic, semantic, procedural) may require different storage solutions. |
+
+---
+
+## 5. Emerging Tools & Libraries
+
+| Tool | Description | Key Feature |
+|------|-------------|-------------|
+| **LangMem** | From the LangChain family | Easy integration with LangGraph agents |
+| **MemZero** | Rapidly growing platform | Memory layer for GenAI apps |
+| **SuperMemory** | Built by a 15-year-old Indian prodigy | Manages long-term memory for GenAI apps |
+
+These tools abstract away the complexity of creation, storage, and retrieval – developers only need to integrate the library.
+
+---
+
+## 6. The Future: LLMs with Intrinsic Memory
+
+**Current problem:** LLMs have no intrinsic memory, requiring complex external systems.
+
+**Future direction:** Research on LLMs with built-in memory, e.g., Google's **"Titans + Mirage"** paper – a new transformer architecture with intrinsic memory capabilities.
+
+Once LLMs have intrinsic memory, the need for external memory systems may reduce significantly.
+
+---
+
+## 7. Summary Table: STM vs LTM
+
+| Aspect | Short-Term Memory (STM) | Long-Term Memory (LTM) |
+|--------|-------------------------|------------------------|
+| **Scope** | Single thread/conversation | Across all conversations |
+| **Persistence** | In-memory (lost on restart) | Persistent storage (DB, Vector DB) |
+| **What it stores** | Full conversation history | Selected, important information |
+| **Types** | Only one type | Episodic, Semantic, Procedural |
+| **Retrieval** | Exhaustive (sends everything) | Selective (only relevant pieces) |
+| **User personalisation** | ❌ No | ✅ Yes |
+| **Cross-thread reasoning** | ❌ No | ✅ Yes |
+| **Implementation complexity** | Simple | Complex (requires orchestration) |
+
+---
+
+## 8. Key Takeaways
+
+- **LTM is essential** for building personalised assistants that remember users across conversations.
+- **Three types of LTM**: Episodic (past events), Semantic (facts), Procedural (how to do things).
+- **Four-step architecture**: Creation → Storage → Retrieval → Injection.
+- **Retrieval is selective** – only relevant pieces are brought into the current conversation.
+- **LTM never directly interacts with the LLM** – it is first injected into STM/prompt.
+- **Tools like LangMem, MemZero, SuperMemory** are emerging to simplify LTM implementation.
+- **The future** is LLMs with intrinsic memory – eliminating the need for external memory systems.
+
+---
+
+## 024. How To Implement Short Term Memory Using LangGraph (52:45)
 
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
