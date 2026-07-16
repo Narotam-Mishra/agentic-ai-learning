@@ -11147,5 +11147,420 @@ Once LLMs have intrinsic memory, the need for external memory systems may reduce
 
 ## 024. How To Implement Short Term Memory Using LangGraph (52:45)
 
+## Short-Term Memory & Persistence in LangGraph
+
+This part of tutorial covers how to **implement short‑term memory in LangGraph** using checkpoints and thread IDs, then explains why **in‑memory storage is insufficient for production**, and finally shows how to set up **persistent memory using PostgreSQL** (with Docker) so that conversations survive application restarts.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **LLMs are stateless** | They have no intrinsic memory; each `invoke()` is independent. |
+| 2 | **Short‑term memory** | A conversation buffer that stores all messages of a thread and sends them to the LLM on every request. |
+| 3 | **LangGraph checkpointer** | Saves the graph state at every superstep – the foundation for both STM and persistence. |
+| 4 | **Thread ID** | A unique identifier for each conversation. Checkpoints are stored per thread. |
+| 5 | **In‑memory checkpointer** (`MemorySaver`) | Stores state in RAM – lost on restart. Good for development, not production. |
+| 6 | **Production persistence** | Use a persistent database (PostgreSQL recommended) with `PostgresSaver`. |
+| 7 | **Docker setup** | Run PostgreSQL in Docker to avoid complex local installation issues. |
+| 8 | **PostgresSaver** | LangGraph's checkpointer for PostgreSQL – stores state permanently. |
+| 9 | **Verification** | After restarting the application, `get_state()` still returns the full conversation history from the database. |
+
+---
+
+## 1. Recap: Why Short‑Term Memory Is Needed
+
+### The Problem: LLMs Are Stateless
+
+When you call an LLM multiple times, each call is independent:
+
+```python
+# First call
+llm.invoke("My name is Nitish")  # → "Nice to meet you"
+
+# Second call – LLM has no memory
+llm.invoke("What is my name?")   # → "I don't know"
+```
+
+### The Solution: Conversation Buffer
+
+Store the entire conversation history in a list and send **everything** to the LLM on every request:
+
+```python
+# Maintain a buffer
+messages = []
+messages.append("My name is Nitish")
+messages.append("Nice to meet you")  # AI response
+messages.append("What is my name?")
+
+# Send the entire history
+llm.invoke(messages)  # → "Your name is Nitish"
+```
+
+This is **short‑term memory** – the conversation buffer.
+
+---
+
+## 2. Short‑Term Memory in LangGraph
+
+### Key Components
+
+1. **Checkpointer** – saves state at each step.
+2. **Thread ID** – identifies which conversation the state belongs to.
+3. **Config** – passed to `invoke()` to tell LangGraph which thread to use.
+
+### Without Memory (Stateless)
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from typing import Annotated, List, TypedDict
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+# State
+class ChatState(TypedDict):
+    messages: Annotated[List, add_messages]
+
+# LLM
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+# Node
+def call_model(state: ChatState):
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+# Graph – NO checkpointer
+graph = StateGraph(ChatState)
+graph.add_node("call_model", call_model)
+graph.add_edge(START, "call_model")
+graph.add_edge("call_model", END)
+
+chatbot = graph.compile()
+
+# Run two messages – NO memory
+result1 = chatbot.invoke({"messages": [HumanMessage(content="My name is Nitish")]})
+print(result1["messages"][-1].content)  # "Nice to meet you"
+
+result2 = chatbot.invoke({"messages": [HumanMessage(content="What is my name?")]})
+print(result2["messages"][-1].content)  # "I don't know" – NO MEMORY!
+```
+
+**Output:**
+```
+Nice to meet you Nitish
+I'm sorry, I don't know your name.
+```
+
+### With Memory (Using Checkpointer + Thread ID)
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+# Create checkpointer
+checkpointer = MemorySaver()
+
+# Compile graph with checkpointer
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# Define thread ID
+config = {"configurable": {"thread_id": "thread_1"}}
+
+# First message – creates conversation
+result1 = chatbot.invoke(
+    {"messages": [HumanMessage(content="My name is Nitish")]},
+    config=config
+)
+print(result1["messages"][-1].content)  # "Nice to meet you Nitish"
+
+# Second message – same thread, remembers
+result2 = chatbot.invoke(
+    {"messages": [HumanMessage(content="What is my name?")]},
+    config=config
+)
+print(result2["messages"][-1].content)  # "Your name is Nitish"
+```
+
+**Output:**
+```
+Nice to meet you Nitish
+Your name is Nitish
+```
+
+**Why this works:**
+- The **checkpointer** saves the state after the first message.
+- The **thread ID** (`thread_1`) tells LangGraph which saved state to load.
+- On the second invocation, LangGraph loads the previous state, appends the new message, and runs the graph.
+
+### Different Threads = Different Conversations
+
+```python
+# Thread 2 – new conversation, no memory of thread 1
+config2 = {"configurable": {"thread_id": "thread_2"}}
+result3 = chatbot.invoke(
+    {"messages": [HumanMessage(content="What is my name?")]},
+    config=config2
+)
+print(result3["messages"][-1].content)  # "I don't know"
+```
+
+**Output:**
+```
+I'm sorry, I don't know your name.
+```
+
+---
+
+## 3. The Problem with `MemorySaver` – Volatile RAM
+
+`MemorySaver` stores state in **RAM**. If the application restarts, all data is lost.
+
+```python
+# After restarting the Python kernel
+# The state is gone – even with the same thread ID
+config = {"configurable": {"thread_id": "thread_1"}}
+state = chatbot.get_state(config)
+print(state.values)  # {} – empty!
+```
+
+**Why this is a problem:**
+- Users lose their conversation history on server restart.
+- Cannot resume past conversations.
+- Not suitable for production.
+
+---
+
+## 4. Solution: Persistent Memory with PostgreSQL
+
+### Step 1: Set Up PostgreSQL with Docker
+
+This avoids complex local installation issues.
+
+**1. Create a `docker-compose.yml` file:**
+
+```yaml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: langgraph_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+```
+
+**2. Start PostgreSQL:**
+
+```bash
+docker-compose up -d
+```
+
+**3. Verify it's running:**
+
+```bash
+docker ps
+# You should see a postgres container running
+```
+
+### Step 2: Install Required Dependencies
+
+```bash
+pip install langgraph-checkpoint-postgres psycopg2-binary
+```
+
+### Step 3: Use `PostgresSaver` Instead of `MemorySaver`
+
+```python
+import os
+from langgraph.checkpoint.postgres import PostgresSaver
+
+# Database connection string
+DB_URI = "postgresql://postgres:postgres@localhost:5432/langgraph_db"
+
+# Connect to PostgreSQL
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    # Set up tables (first time only)
+    checkpointer.setup()
+    
+    # Compile graph with persistent checkpointer
+    chatbot = graph.compile(checkpointer=checkpointer)
+    
+    # Thread config
+    config = {"configurable": {"thread_id": "persistent_thread"}}
+    
+    # First message
+    result1 = chatbot.invoke(
+        {"messages": [HumanMessage(content="My name is Nitish")]},
+        config=config
+    )
+    print(result1["messages"][-1].content)
+    
+    # Second message – remembers
+    result2 = chatbot.invoke(
+        {"messages": [HumanMessage(content="What is my name?")]},
+        config=config
+    )
+    print(result2["messages"][-1].content)
+```
+
+### Step 4: Verify Persistence After Restart
+
+After restarting the Python kernel, the state is still available:
+
+```python
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()
+    chatbot = graph.compile(checkpointer=checkpointer)
+    
+    config = {"configurable": {"thread_id": "persistent_thread"}}
+    
+    # Get the full state – no new messages, just retrieve
+    state = chatbot.get_state(config)
+    print(state.values["messages"])
+    # Output: [
+    #   HumanMessage(content="My name is Nitish"),
+    #   AIMessage(content="Nice to meet you Nitish"),
+    #   HumanMessage(content="What is my name?"),
+    #   AIMessage(content="Your name is Nitish")
+    # ]
+```
+
+**Key benefit:** The full conversation history is **still there** even after the application restarted.
+
+---
+
+## 5. Complete Working Code Example
+
+```python
+# persistence_demo.py
+import os
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.postgres import PostgresSaver
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from typing import Annotated, List, TypedDict
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------- State ----------
+class ChatState(TypedDict):
+    messages: Annotated[List, add_messages]
+
+# ---------- LLM ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+# ---------- Node ----------
+def call_model(state: ChatState):
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+# ---------- Graph ----------
+graph = StateGraph(ChatState)
+graph.add_node("call_model", call_model)
+graph.add_edge(START, "call_model")
+graph.add_edge("call_model", END)
+
+# ---------- Persistent Checkpointer ----------
+DB_URI = "postgresql://postgres:postgres@localhost:5432/langgraph_db"
+
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    # Create tables (only needs to run once)
+    checkpointer.setup()
+    
+    # Compile with persistence
+    chatbot = graph.compile(checkpointer=checkpointer)
+    
+    # ---------- Use Thread 1 ----------
+    config1 = {"configurable": {"thread_id": "user_123"}}
+    
+    # First message
+    result1 = chatbot.invoke(
+        {"messages": [HumanMessage(content="My name is Nitish. I'm a YouTuber.")]},
+        config=config1
+    )
+    print("Turn 1:", result1["messages"][-1].content)
+    
+    # Second message – same thread
+    result2 = chatbot.invoke(
+        {"messages": [HumanMessage(content="What is my name and profession?")]},
+        config=config1
+    )
+    print("Turn 2:", result2["messages"][-1].content)
+    
+    # ---------- Use Thread 2 (different conversation) ----------
+    config2 = {"configurable": {"thread_id": "user_456"}}
+    
+    # New thread – no context from thread 1
+    result3 = chatbot.invoke(
+        {"messages": [HumanMessage(content="What is my name?")]},
+        config=config2
+    )
+    print("New thread:", result3["messages"][-1].content)
+
+# ---------- After restart: verify persistence ----------
+# (Run this in a separate cell or after restarting the kernel)
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    chatbot = graph.compile(checkpointer=checkpointer)
+    
+    config1 = {"configurable": {"thread_id": "user_123"}}
+    saved_state = chatbot.get_state(config1)
+    
+    print("\n--- Saved conversation (after restart) ---")
+    for msg in saved_state.values["messages"]:
+        print(f"{msg.type}: {msg.content}")
+```
+
+**Output (before restart):**
+```
+Turn 1: Nice to meet you Nitish! What brings you to YouTube?
+Turn 2: You are Nitish, a YouTuber.
+New thread: I'm sorry, I don't know your name.
+```
+
+**Output (after restart – same data!):**
+```
+--- Saved conversation (after restart) ---
+human: My name is Nitish. I'm a YouTuber.
+ai: Nice to meet you Nitish! What brings you to YouTube?
+human: What is my name and profession?
+ai: You are Nitish, a YouTuber.
+```
+
+---
+
+## 6. Comparison Summary
+
+| Aspect | `MemorySaver` (In-Memory) | `PostgresSaver` (Persistent) |
+|--------|---------------------------|-------------------------------|
+| **Storage** | RAM | PostgreSQL database |
+| **Survives restart?** | ❌ No | ✅ Yes |
+| **Production ready?** | ❌ No | ✅ Yes |
+| **Setup complexity** | Simple (just import) | Requires Docker/PostgreSQL |
+| **Use case** | Development, testing | Production |
+| **Multiple users** | Limited (single process) | Yes (database handles concurrency) |
+
+---
+
+## 7. Key Takeaways
+
+- **Short‑term memory** in LangGraph = checkpointing + thread IDs.
+- **`MemorySaver`** is perfect for development – quick, no external dependencies.
+- **For production**, always use a persistent checkpointer like `PostgresSaver`.
+- **Docker** makes PostgreSQL setup easy and consistent across environments.
+- **State survives restarts** with PostgreSQL – users never lose their conversation history.
+- **Different threads** = different conversations – each with its own memory.
+
+---
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
