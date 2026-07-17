@@ -27,7 +27,7 @@ builer.add_edge(START, "call_model")
 t2 = {"configurable": {"thread_id": "thread-2"}}
 
 with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
-    # Create or migrate the LangGraph checkpoint tables before reading state.
+    # create or migrate the LangGraph checkpoint tables before reading state.
     checkpointer.setup()
 
     graph = builer.compile(checkpointer=checkpointer)
