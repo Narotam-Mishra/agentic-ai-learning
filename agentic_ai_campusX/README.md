@@ -10110,7 +10110,7 @@ AI: Purchase of 50 shares of Google was cancelled.
 
 ## 022. How to build Subgraphs in LangGraph (22:46)
 
-# Detailed Summary: Subgraphs in LangGraph
+## Subgraphs in LangGraph
 
 This tutorial covers **subgraphs** – a powerful concept in LangGraph where a graph is embedded as a node inside another graph. Subgraphs enable **modularity, reusability, and maintainability** in complex AI workflows, and are essential for building **multi-agent systems**. The video explains:
 
@@ -11559,6 +11559,461 @@ ai: You are Nitish, a YouTuber.
 - **Docker** makes PostgreSQL setup easy and consistent across environments.
 - **State survives restarts** with PostgreSQL – users never lose their conversation history.
 - **Different threads** = different conversations – each with its own memory.
+
+---
+
+## Context Window Overflow – Trimming, Deletion & Summarization in LangGraph
+
+This part of tutorial covers how to handle the **context window overflow problem** in LangGraph chatbots. When conversations get too long, they exceed the LLM's token limit, causing hallucinations or incoherent responses. The video demonstrates three techniques to manage this:
+
+1. **Trimming** – keep only the most recent N messages (or within a token limit).
+2. **Deletion** – permanently remove older messages from state.
+3. **Summarization** – compress older messages into a summary and keep recent messages.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Context window overflow** | When the total token count of input messages exceeds the LLM's context window limit, the response quality degrades (hallucinations, incoherence). |
+| 2 | **Trimming** | Keep only the most recent messages that fit within a token limit. Older messages are temporarily ignored (not sent to LLM) but remain in state. |
+| 3 | **Trimming function** | LangChain provides `trim_messages()` – pass messages and a `max_tokens` limit; it returns only messages within that limit. |
+| 4 | **Deletion** | Permanently remove messages from state using `remove_messages()` with message IDs. |
+| 5 | **Summarization** | Use an LLM to generate a summary of older messages, then delete those messages and store the summary in state. |
+| 6 | **Summarization workflow** | A conditional node: if `len(messages) > threshold`, trigger summarization; otherwise continue normally. |
+| 7 | **Summary injection** | When sending messages to the LLM, include the summary (as a system message) + the most recent messages. |
+| 8 | **State design** | For summarization, the state needs both `messages` and `summary` fields. |
+| 9 | **Trimming vs Summarization** | Trimming discards older context completely; summarization preserves it in compressed form. |
+| 10 | **Deletion + Summarization** | After summarising, delete the old messages and keep only the summary + recent messages. |
+
+---
+
+## 1. The Context Window Overflow Problem
+
+### What Is the Context Window?
+
+Every LLM has a **context window** – the maximum number of tokens it can process in one request.
+
+| Model | Context Window (tokens) |
+|-------|--------------------------|
+| GPT-4o-mini | ~128,000 |
+| GPT-4o | ~128,000 |
+| Gemini 1.5 | ~1,000,000+ |
+
+### The Problem
+
+In short-term memory, we send the **entire conversation history** on every request:
+
+```python
+# On every request, we send ALL messages
+response = llm.invoke(all_messages)
+```
+
+If the conversation grows to hundreds of messages, the total token count may exceed the context window, causing:
+
+- Hallucinations
+- Incoherent responses
+- The LLM to "forget" earlier parts of the conversation
+
+**The solution:** Manage the conversation history so it stays within the token limit.
+
+---
+
+## 2. Technique 1: Trimming
+
+### What Is Trimming?
+
+Trimming keeps only the most recent messages that fit within a token limit. Older messages are **ignored** (not sent to the LLM), but they remain stored in the state.
+
+**Key idea:** Only the recent part of the conversation is relevant for the current response.
+
+### Code Example: Trimming with LangChain
+
+```python
+from langchain_core.messages import trim_messages
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_openai import ChatOpenAI
+from typing import Annotated, List, TypedDict
+from langchain_core.messages import HumanMessage, AIMessage
+
+# ---------- State ----------
+class ChatState(TypedDict):
+    messages: Annotated[List, add_messages]
+
+# ---------- LLM ----------
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+# ---------- Node with Trimming ----------
+def call_model(state: ChatState):
+    # 1. Get all messages from state
+    messages = state["messages"]
+    
+    # 2. Trim to max 150 tokens (keep only recent ones)
+    trimmed_messages = trim_messages(
+        messages,
+        max_tokens=150,                     # Token limit
+        strategy="last",                    # Keep from the end
+        token_counter=llm.get_num_tokens,   # How to count tokens
+        include_system=True,                # Always include system messages
+        allow_partial=False                 # Don't cut mid-message
+    )
+    
+    # 3. Invoke LLM with trimmed messages
+    response = llm.invoke(trimmed_messages)
+    return {"messages": [response]}
+
+# ---------- Graph ----------
+graph = StateGraph(ChatState)
+graph.add_node("call_model", call_model)
+graph.add_edge(START, "call_model")
+graph.add_edge("call_model", END)
+
+checkpointer = MemorySaver()
+chatbot = graph.compile(checkpointer=checkpointer)
+
+# ---------- Test ----------
+config = {"configurable": {"thread_id": "test_thread"}}
+
+# Turn 1
+result1 = chatbot.invoke(
+    {"messages": [HumanMessage(content="My name is Nitish")]},
+    config=config
+)
+print("Turn 1:", result1["messages"][-1].content)
+
+# Turn 2 – ask for name
+result2 = chatbot.invoke(
+    {"messages": [HumanMessage(content="What is my name?")]},
+    config=config
+)
+print("Turn 2:", result2["messages"][-1].content)
+```
+
+**Example behavior:**
+
+| Conversation Length | Token Count | Action |
+|---------------------|-------------|--------|
+| 1-2 messages | ~10-20 tokens | Send all messages |
+| 5-6 messages | ~100-130 tokens | Send all messages (under limit) |
+| 10+ messages | 150+ tokens | Trim → only keep recent messages |
+
+### What Trimming Does (Conceptual)
+
+```
+Original messages: [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10]
+Token limit: 150 tokens (fits ~4-5 messages)
+
+After trimming: [M7, M8, M9, M10]  ← only recent ones
+```
+
+**The LLM never sees M1–M6.**
+
+### Limitations of Trimming
+
+- **Context loss** – older messages are completely discarded.
+- **Assumption fails** – in many real-world scenarios, older context is still relevant.
+- **Example:** A user says "I prefer Python" early in the conversation. Later, when they ask for code examples, the LLM has forgotten this preference.
+
+---
+
+## 3. Technique 2: Deletion
+
+### What Is Deletion?
+
+Deletion **permanently removes** messages from the state. This is different from trimming (which only ignores messages when sending to the LLM but keeps them in state).
+
+### Why Deletion Matters for Summarization
+
+When we summarise old messages, we don't want to keep the original messages AND the summary – that would waste tokens. So we delete the old messages and keep only the summary.
+
+### Code Example: Deleting Messages
+
+```python
+from langchain_core.messages import remove_messages
+
+# In a node, after summarising:
+def summarize_and_delete(state):
+    # ... generate summary ...
+    
+    # Identify which messages to delete (all except the last 2)
+    messages_to_delete = []
+    if len(state["messages"]) > 10:
+        # Delete the first 6 messages (oldest)
+        for i in range(6):
+            messages_to_delete.append(state["messages"][i].id)
+    
+    # Return both the summary and the deletion command
+    return {
+        "summary": new_summary,
+        "messages": remove_messages(messages_to_delete)
+    }
+```
+
+**`remove_messages()`** takes a list of message IDs and removes them from the state permanently.
+
+---
+
+## 4. Technique 3: Summarization
+
+### What Is Summarization?
+
+Summarization compresses older messages into a **summary** using an LLM, then **deletes** the original messages and keeps only:
+
+1. The **summary** of older messages
+2. The **most recent** messages
+
+### How Summarization Works
+
+```
+Before:
+[M1, M2, M3, M4, M5, M6, M7, M8]  (8 messages)
+
+After summarization:
+[Summary of M1-M6, M7, M8]  (summary + 2 recent messages)
+```
+
+**The LLM sees:** summary of the whole conversation + the last few exchanges.
+
+### Full Summarization Workflow in LangGraph
+
+#### Step 1: Define State
+
+```python
+from typing import TypedDict, Annotated, List
+from langgraph.graph.message import add_messages
+
+class SummaryState(TypedDict):
+    messages: Annotated[List, add_messages]
+    summary: str   # New field for the summary
+```
+
+#### Step 2: Chat Node (Injects Summary into Prompt)
+
+```python
+def chat_node(state: SummaryState):
+    messages = []
+    
+    # 1. If summary exists, add it as a system message first
+    if state.get("summary"):
+        messages.append(SystemMessage(content=f"Conversation summary: {state['summary']}"))
+    
+    # 2. Add all current messages
+    messages.extend(state["messages"])
+    
+    # 3. Call LLM
+    response = llm.invoke(messages)
+    return {"messages": [response]}
+```
+
+#### Step 3: Summarization Node
+
+```python
+def summarize_conversation(state: SummaryState):
+    # 1. Get existing summary (if any)
+    existing_summary = state.get("summary", "")
+    
+    # 2. Determine which messages to summarise (all except last 2)
+    messages_to_summarise = state["messages"][:-2]
+    
+    # 3. Build prompt
+    if existing_summary:
+        prompt = f"""
+        Existing summary: {existing_summary}
+        
+        Extend this summary with the following new conversation:
+        {messages_to_summarise}
+        """
+    else:
+        prompt = f"Summarise this conversation:\n{messages_to_summarise}"
+    
+    # 4. Generate summary using a separate LLM (or same)
+    summary_response = summariser_llm.invoke(prompt)
+    new_summary = summary_response.content
+    
+    # 5. Delete the summarised messages (keep only last 2)
+    ids_to_delete = [msg.id for msg in messages_to_summarise]
+    
+    return {
+        "summary": new_summary,
+        "messages": remove_messages(ids_to_delete)
+    }
+```
+
+#### Step 4: Conditional Routing
+
+```python
+def should_summarise(state: SummaryState) -> bool:
+    return len(state["messages"]) > 6  # If more than 6 messages, summarise
+
+# In the graph
+graph.add_conditional_edges(
+    "chat_node",
+    should_summarise,
+    {
+        True: "summarize",
+        False: END
+    }
+)
+```
+
+#### Step 5: Full Graph Structure
+
+```
+START → chat_node
+           ↓ (conditional)
+      ┌────┴────┐
+      ↓         ↓
+   summarize   END
+      ↓
+     END
+```
+
+### Complete Code Example
+
+```python
+from typing import TypedDict, Annotated, List
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, remove_messages
+
+# ---------- State ----------
+class SummaryState(TypedDict):
+    messages: Annotated[List, add_messages]
+    summary: str
+
+# ---------- LLMs ----------
+llm = ChatOpenAI(model="gpt-4o-mini")           # Main LLM
+summariser = ChatOpenAI(model="gpt-4o-mini")    # For summarisation
+
+# ---------- Chat Node ----------
+def chat_node(state: SummaryState):
+    messages = []
+    
+    # Inject summary if exists
+    if state.get("summary"):
+        messages.append(SystemMessage(content=f"Conversation summary: {state['summary']}"))
+    
+    # Add current messages
+    messages.extend(state["messages"])
+    
+    response = llm.invoke(messages)
+    return {"messages": [response]}
+
+# ---------- Summarisation Node ----------
+def summarize_node(state: SummaryState):
+    existing_summary = state.get("summary", "")
+    messages_to_summarise = state["messages"][:-2]  # All except last 2
+    
+    if not messages_to_summarise:
+        return {}
+    
+    if existing_summary:
+        prompt = f"""
+        Existing summary: {existing_summary}
+        
+        Extend this summary with the following new conversation:
+        {messages_to_summarise}
+        
+        Provide an updated, concise summary.
+        """
+    else:
+        prompt = f"Summarise this conversation in a few sentences:\n{messages_to_summarise}"
+    
+    response = summariser.invoke(prompt)
+    new_summary = response.content
+    
+    # Delete old messages (keep only last 2)
+    ids_to_delete = [msg.id for msg in messages_to_summarise]
+    
+    return {
+        "summary": new_summary,
+        "messages": remove_messages(ids_to_delete)
+    }
+
+# ---------- Conditional Router ----------
+def should_summarise(state: SummaryState) -> bool:
+    return len(state["messages"]) > 6
+
+# ---------- Build Graph ----------
+graph = StateGraph(SummaryState)
+graph.add_node("chat", chat_node)
+graph.add_node("summarize", summarize_node)
+
+graph.add_edge(START, "chat")
+graph.add_conditional_edges(
+    "chat",
+    should_summarise,
+    {True: "summarize", False: END}
+)
+graph.add_edge("summarize", END)
+
+checkpointer = MemorySaver()
+app = graph.compile(checkpointer=checkpointer)
+
+# ---------- Test ----------
+config = {"configurable": {"thread_id": "test"}}
+
+# Turn 1
+result1 = app.invoke({"messages": [HumanMessage(content="What is quantum physics?")]}, config=config)
+print("Turn 1 done")
+
+# Turn 2
+result2 = app.invoke({"messages": [HumanMessage(content="How is Einstein related?")]}, config=config)
+
+# Turn 3
+result3 = app.invoke({"messages": [HumanMessage(content="What are some of Einstein's famous works?")]}, config=config)
+
+# Turn 4 (triggers summarisation)
+result4 = app.invoke({"messages": [HumanMessage(content="Explain special relativity")]}, config=config)
+
+# Check final state
+final_state = app.get_state(config)
+print("Summary:", final_state.values.get("summary"))
+print("Messages remaining:", len(final_state.values["messages"]))
+# Output: Summary exists, only 2 messages remain
+```
+
+---
+
+## 5. Comparison: Trimming vs Summarization
+
+| Aspect | Trimming | Summarization |
+|--------|----------|---------------|
+| **What it does** | Keeps only recent messages | Compresses old messages into a summary |
+| **Context preservation** | ❌ Loses older context | ✅ Preserves key information |
+| **Token efficiency** | ✅ Very efficient | ✅ Efficient (summary + recent) |
+| **Implementation complexity** | Simple (one function call) | Moderate (needs LLM, deletion) |
+| **Cost** | Low (no extra LLM calls) | Higher (extra LLM call for summarisation) |
+| **When to use** | Short conversations, simple tasks | Long conversations, complex reasoning |
+| **Memory usage** | State still stores all messages | State stores only summary + recent |
+
+---
+
+## 6. Summary Table of Techniques
+
+| Technique | Key Function | What It Does | When to Use |
+|-----------|--------------|--------------|-------------|
+| **Trimming** | `trim_messages()` | Keeps only recent messages within token limit, ignores older ones | Quick fix, simple conversations |
+| **Deletion** | `remove_messages()` | Permanently removes messages from state | Clean up state after summarisation |
+| **Summarization** | Custom node + LLM | Compresses old messages into a summary, deletes originals | Long-running conversations, need context retention |
+
+---
+
+## 7. Key Takeaways
+
+- **Context window overflow** is a real problem in long conversations.
+- **Trimming** is the simplest solution but loses older context.
+- **Summarization** preserves context in compressed form but costs extra tokens/LLM calls.
+- **Deletion** is necessary after summarisation to keep state clean.
+- **LangGraph** makes it easy to implement all three strategies with conditional routing.
+- **Choose the right strategy** based on your use case:
+  - Simple FAQ bot → trimming.
+  - Complex, long-running assistant → summarization.
 
 ---
 
