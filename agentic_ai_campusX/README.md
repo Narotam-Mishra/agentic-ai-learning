@@ -12017,5 +12017,9 @@ print("Messages remaining:", len(final_state.values["messages"]))
 
 ---
 
+## 025. Long Term Memory in LangGraph (01:05:34)
+
+
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
 
