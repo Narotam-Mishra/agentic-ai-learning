@@ -12019,7 +12019,577 @@ print("Messages remaining:", len(final_state.values["messages"]))
 
 ## 025. Long Term Memory in LangGraph (01:05:34)
 
+This tutorial covers the complete implementation of **Long-Term Memory (LTM)** in LangGraph. It explains why LTM is needed, how to implement memory stores (both in-memory and persistent), and how to integrate them into a LangGraph chatbot for reading and writing memories.
 
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Long-Term Memory (LTM)** | A persistent storage system that remembers user information across multiple conversations. Stores user preferences, identity, projects, and other stable information. |
+| 2 | **Why LTM is needed** | Users share information across different conversation threads (identity, preferences, projects). LTM aggregates this information to personalize responses. |
+| 3 | **Memory Store** | LangGraph's abstraction for storing and retrieving memories. `BaseStore` is the abstract class; `InMemoryStore` (RAM) and `PostgresStore` (database) are implementations. |
+| 4 | **Namespace** | A hierarchical folder-like structure for organizing memories (e.g., `("users", "U1", "profile")`). |
+| 5 | **CRUD operations** | `put()` – create/update memory; `get()` – retrieve one memory; `search()` – retrieve multiple memories; supports semantic search with embeddings. |
+| 6 | **Semantic Search** | Search memories based on meaning (not exact keywords) using embeddings. Requires passing an embedding model when creating the store. |
+| 7 | **Memory Extraction** | Using a separate LLM to extract memory-worthy information from user messages. Returns a structured output with the memory text and whether it's new. |
+| 8 | **Deduplication** | Avoid creating duplicate memories by comparing extracted memories with existing ones. Prevents redundant storage and memory bloat. |
+| 9 | **Two-node workflow** | `REMEMBER` node (extract + write memories) → `CHAT` node (read memories + generate response). |
+| 10 | **Persistence** | `InMemoryStore` stores in RAM (volatile). `PostgresStore` stores in PostgreSQL (persistent, production-ready). |
+
+---
+
+## 1. What is Long-Term Memory?
+
+### The Problem
+
+Users share information across multiple conversations:
+- Conversation 1: "I'm a programmer and I prefer Python."
+- Conversation 2: "I'm planning to move to Mumbai."
+- Conversation 3: "I have a philosophical inclination."
+
+Each conversation contains different user information. **Short-term memory** is thread-scoped – it cannot remember information from one conversation to the next.
+
+### The Solution: Long-Term Memory
+
+LTM stores important user information **across all conversations** in a persistent store.
+
+**How it works:**
+1. During a conversation, the system extracts memory-worthy information.
+2. It stores it in a persistent memory store (database).
+3. In future conversations, the system retrieves relevant memories.
+4. The LLM uses these memories to personalize responses.
+
+**Example:** User says "I prefer Python" in one conversation. In a later conversation, when they ask for code, the LLM responds with Python code (not Java or C++).
+
+---
+
+## 2. Understanding Memory Stores in LangGraph
+
+### The BaseStore Abstraction
+
+LangGraph provides a `BaseStore` abstract class that defines the interface for memory storage:
+
+| Method | Purpose |
+|--------|---------|
+| `put(namespace, key, value)` | Create/update a single memory |
+| `get(namespace, key)` | Retrieve a single memory |
+| `search(namespace, query=None, limit=None)` | Search for multiple memories |
+
+### Namespace Concept
+
+**Namespace** = a folder-like structure for organizing memories. It is a **tuple of strings**.
+
+```
+("users", "U1")               → User U1's all memories
+("users", "U1", "profile")    → User U1's profile data
+("users", "U1", "preferences")→ User U1's preferences
+("users", "U2", "profile")    → User U2's profile data
+```
+
+**Analogy:** Namespace is like a file path – it helps organize memories hierarchically.
+
+### Two Implementations
+
+| Implementation | Storage | Persistence | Use Case |
+|----------------|---------|-------------|----------|
+| `InMemoryStore` | RAM | ❌ Volatile | Development, prototyping |
+| `PostgresStore` | PostgreSQL | ✅ Persistent | Production |
+
+---
+
+## 3. Basic Memory Store Operations
+
+### Creating a Memory Store
+
+```python
+from langgraph.store.memory import InMemoryStore
+
+# Create store
+store = InMemoryStore()
+```
+
+### Storing Memories (put)
+
+```python
+# Define namespace
+namespace = ("users", "U1")
+
+# Store first memory
+store.put(
+    namespace,
+    key="1",
+    value={"data": "User likes pizza"}
+)
+
+# Store second memory
+store.put(
+    namespace,
+    key="2",
+    value={"data": "User prefers dark mode"}
+)
+```
+
+### Retrieving a Single Memory (get)
+
+```python
+# Get specific memory
+memory = store.get(namespace, key="1")
+print(memory.value)  # {"data": "User likes pizza"}
+```
+
+### Searching All Memories (search)
+
+```python
+# Get all memories for a namespace
+items = store.search(namespace)
+for item in items:
+    print(f"Key: {item.key}, Value: {item.value}")
+```
+
+---
+
+## 4. Semantic Search with Embeddings
+
+### Why Semantic Search?
+
+Instead of retrieving all memories (which could be hundreds), we want to retrieve only those **relevant** to the current conversation.
+
+**Without semantic search:** Retrieve all 100 memories → overwhelm the LLM.  
+**With semantic search:** Retrieve only the 2-3 most relevant memories → clean, focused context.
+
+### Implementation
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langgraph.store.memory import InMemoryStore
+
+# 1. Create embedding model
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# 2. Create store with embedding support
+store = InMemoryStore(
+    index={
+        "dims": 1536,  # embedding dimension
+        "embed": embeddings
+    }
+)
+
+# 3. Store memories (embeddings are automatically generated)
+namespace = ("users", "U1")
+store.put(namespace, "1", {"data": "User is learning machine learning"})
+store.put(namespace, "2", {"data": "User prefers dark mode"})
+store.put(namespace, "3", {"data": "User likes step-by-step reasoning"})
+
+# 4. Semantic search
+query = "What is the user currently learning?"
+results = store.search(namespace, query=query, limit=1)
+# Returns: "User is learning machine learning" (most semantically similar)
+```
+
+**Key difference:** You pass `query` and `limit` to `search()`. The store compares the query embedding with all stored memory embeddings and returns the most similar ones.
+
+---
+
+## 5. Extracting Memories from Conversations
+
+### The Challenge
+
+We need to identify **what to remember** from each user message.
+
+### Solution: LLM-Based Extraction
+
+Use a separate LLM with structured output to:
+1. Identify if there's anything worth remembering (`should_write`).
+2. Extract the memory text(s).
+3. Compare with existing memories to avoid duplicates (`is_new` flag).
+
+### Memory Schema
+
+```python
+from pydantic import BaseModel
+from typing import List
+
+class MemoryItem(BaseModel):
+    text: str
+    is_new: bool  # True if new, False if already exists
+
+class MemoryDecision(BaseModel):
+    should_write: bool  # True if there's something to remember
+    memories: List[MemoryItem]
+```
+
+### Extraction Code
+
+```python
+from langchain_core.messages import SystemMessage, HumanMessage
+
+def extract_memories(state, config, store):
+    # 1. Get user ID from config
+    user_id = config["configurable"]["user_id"]
+    namespace = ("users", user_id, "details")
+    
+    # 2. Get existing memories
+    existing = store.search(namespace)
+    existing_texts = [item.value["data"] for item in existing]
+    
+    # 3. Build prompt with existing memories
+    system_prompt = f"""
+    Extract long-term memories from the user's message.
+    Existing memories: {existing_texts}
+    
+    For each extracted memory, set is_new=True ONLY if it's not already in existing memories.
+    """
+    
+    # 4. Call structured LLM
+    decision = memory_llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_message)
+    ])
+    
+    # 5. Store new memories
+    for memory in decision.memories:
+        if memory.is_new:
+            store.put(namespace, key=str(uuid.uuid4()), value={"data": memory.text})
+```
+
+---
+
+## 6. Deduplication – Avoiding Duplicate Memories
+
+### The Problem
+
+Without deduplication, if a user says "My name is Nitish" twice, the system stores two identical memories.
+
+### Solution
+
+When extracting memories, provide the **existing memories** to the LLM and ask it to set `is_new=False` for duplicates.
+
+**Prompt for the LLM:**
+
+> "Existing memories: [list of existing memories]. For each extracted memory, set `is_new=True` ONLY if it adds new information not already present."
+
+**Example:**
+
+```
+User: "My name is Nitish"
+Existing: ["User name is Nitish"]  → is_new=False → NOT stored again
+
+User: "I teach AI on YouTube"
+Existing: ["User name is Nitish"]  → is_new=True → STORED
+```
+
+---
+
+## 7. LangGraph Integration – Complete Workflow
+
+### Two-Node Architecture
+
+```
+START → REMEMBER Node → CHAT Node → END
+```
+
+| Node | Purpose |
+|------|---------|
+| **REMEMBER** | Extracts memories from user message and stores them in the memory store. |
+| **CHAT** | Retrieves relevant memories, injects them into the prompt, and generates a personalized response. |
+
+### Graph Setup
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from typing import Annotated, List, TypedDict
+
+class State(TypedDict):
+    messages: Annotated[List, add_messages]
+
+# Create graph
+graph = StateGraph(State)
+graph.add_node("remember", remember_node)
+graph.add_node("chat", chat_node)
+graph.add_edge(START, "remember")
+graph.add_edge("remember", "chat")
+graph.add_edge("chat", END)
+```
+
+### REMEMBER Node
+
+```python
+def remember_node(state: State, config: RunnableConfig, store: BaseStore):
+    # 1. Get user ID
+    user_id = config["configurable"]["user_id"]
+    namespace = ("users", user_id, "details")
+    
+    # 2. Get latest user message
+    last_message = state["messages"][-1].content
+    
+    # 3. Get existing memories
+    existing = store.search(namespace)
+    existing_texts = [item.value["data"] for item in existing]
+    
+    # 4. Extract memories with deduplication
+    decision = memory_extractor.invoke([
+        SystemMessage(content=f"Existing memories: {existing_texts}"),
+        HumanMessage(content=last_message)
+    ])
+    
+    # 5. Store new memories only
+    for memory in decision.memories:
+        if memory.is_new:
+            store.put(namespace, key=str(uuid.uuid4()), value={"data": memory.text})
+    
+    # 6. Return (no message change)
+    return {"messages": []}
+```
+
+### CHAT Node
+
+```python
+def chat_node(state: State, config: RunnableConfig, store: BaseStore):
+    # 1. Get user ID and namespace
+    user_id = config["configurable"]["user_id"]
+    namespace = ("users", user_id, "details")
+    
+    # 2. Retrieve all memories
+    memories = store.search(namespace)
+    
+    # 3. Format memories as text
+    memory_text = "\n".join([item.value["data"] for item in memories])
+    
+    # 4. Create personalized system prompt
+    system_prompt = f"""
+    You are a helpful assistant with memory capabilities.
+    User details: {memory_text}
+    
+    Personalize your responses using the user's details.
+    Address the user by name if known.
+    """
+    
+    # 5. Call LLM with system prompt + conversation
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    response = chat_llm.invoke(messages)
+    
+    return {"messages": [response]}
+```
+
+---
+
+## 8. Production-Grade Persistence – PostgresStore
+
+### Problem with InMemoryStore
+
+- Stores data in **RAM** – lost on restart.
+- Not suitable for production.
+
+### Solution: PostgresStore
+
+```python
+from langgraph.store.postgres import PostgresStore
+
+# Database connection
+DB_URI = "postgresql://postgres:postgres@localhost:5432/langgraph_db"
+
+# Create store
+with PostgresStore.from_conn_string(DB_URI) as store:
+    # Setup tables (first time only)
+    store.setup()
+    
+    # Compile graph with store
+    app = graph.compile(store=store)
+    
+    # Use as before
+    config = {"configurable": {"user_id": "U1"}}
+    app.invoke({"messages": [HumanMessage(content="My name is Nitish")]}, config=config)
+```
+
+### Setting Up PostgreSQL with Docker
+
+1. **Install Docker Desktop** and start it.
+2. **Run PostgreSQL container:**
+   ```bash
+   docker run -d --name langgraph-postgres \
+     -e POSTGRES_USER=postgres \
+     -e POSTGRES_PASSWORD=postgres \
+     -e POSTGRES_DB=langgraph_db \
+     -p 5432:5432 \
+     postgres:16
+   ```
+3. **Verify:**
+   ```bash
+   docker ps
+   ```
+
+### Verify Persistence
+
+After restarting the Python kernel:
+
+```python
+with PostgresStore.from_conn_string(DB_URI) as store:
+    # Memories are still there!
+    namespace = ("users", "U1", "details")
+    memories = store.search(namespace)
+    for item in memories:
+        print(item.value["data"])
+```
+
+**Output:**
+```
+User name is Nitish
+User teaches AI on YouTube
+```
+
+---
+
+## 9. Complete Example: Production-Ready LTM Chatbot
+
+```python
+# ltm_chatbot.py
+import uuid
+from typing import TypedDict, Annotated, List
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.store.postgres import PostgresStore
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from pydantic import BaseModel
+
+# ---------- State ----------
+class State(TypedDict):
+    messages: Annotated[List, add_messages]
+
+# ---------- Schemas ----------
+class MemoryItem(BaseModel):
+    text: str
+    is_new: bool
+
+class MemoryDecision(BaseModel):
+    should_write: bool
+    memories: List[MemoryItem]
+
+# ---------- LLMs ----------
+chat_llm = ChatOpenAI(model="gpt-4o-mini")
+extractor_llm = ChatOpenAI(model="gpt-4o-mini").with_structured_output(MemoryDecision)
+
+# ---------- Nodes ----------
+def remember_node(state: State, config: RunnableConfig, store: PostgresStore):
+    user_id = config["configurable"]["user_id"]
+    namespace = ("users", user_id, "details")
+    
+    # Get existing memories
+    existing = store.search(namespace)
+    existing_texts = [item.value["data"] for item in existing]
+    existing_text = "\n".join(existing_texts)
+    
+    # Extract memories
+    decision = extractor_llm.invoke([
+        SystemMessage(content=f"""
+        Extract memory-worthy information from the user's message.
+        Existing memories: {existing_text}
+        Set is_new=True only if the information adds new content.
+        """),
+        HumanMessage(content=state["messages"][-1].content)
+    ])
+    
+    # Store new memories
+    for memory in decision.memories:
+        if memory.is_new:
+            store.put(namespace, key=str(uuid.uuid4()), value={"data": memory.text})
+    
+    return {"messages": []}
+
+def chat_node(state: State, config: RunnableConfig, store: PostgresStore):
+    user_id = config["configurable"]["user_id"]
+    namespace = ("users", user_id, "details")
+    
+    # Retrieve memories
+    memories = store.search(namespace)
+    memory_text = "\n".join([item.value["data"] for item in memories])
+    
+    # Personalized system prompt
+    system_prompt = f"""
+    You are a helpful assistant with memory capabilities.
+    User details: {memory_text}
+    
+    Personalize your responses:
+    - Address the user by name if known
+    - Reference their preferences and projects
+    - Suggest relevant follow-up questions
+    """
+    
+    # Generate response
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    response = chat_llm.invoke(messages)
+    
+    return {"messages": [response]}
+
+# ---------- Graph ----------
+graph = StateGraph(State)
+graph.add_node("remember", remember_node)
+graph.add_node("chat", chat_node)
+graph.add_edge(START, "remember")
+graph.add_edge("remember", "chat")
+graph.add_edge("chat", END)
+
+# ---------- Run ----------
+DB_URI = "postgresql://postgres:postgres@localhost:5432/langgraph_db"
+
+with PostgresStore.from_conn_string(DB_URI) as store:
+    store.setup()
+    app = graph.compile(store=store)
+    
+    config = {"configurable": {"user_id": "U1"}}
+    
+    # First message – creates memories
+    result = app.invoke(
+        {"messages": [HumanMessage(content="My name is Nitish. I teach AI on YouTube.")]},
+        config=config
+    )
+    print(result["messages"][-1].content)
+    
+    # Second message – personalized response
+    result = app.invoke(
+        {"messages": [HumanMessage(content="Explain GenAI simply.")]},
+        config=config
+    )
+    print(result["messages"][-1].content)
+```
+
+---
+
+## 10. Comparison: InMemoryStore vs PostgresStore
+
+| Aspect | InMemoryStore | PostgresStore |
+|--------|---------------|---------------|
+| **Storage** | RAM | PostgreSQL database |
+| **Persistence** | ❌ Lost on restart | ✅ Survives restarts |
+| **Setup** | Simple (just import) | Requires PostgreSQL (Docker) |
+| **Use case** | Development, testing | Production |
+| **Semantic search** | ✅ Supported | ✅ Supported |
+| **Scalability** | Limited to one process | Database handles concurrency |
+
+---
+
+## 11. Key Takeaways
+
+- **Long-Term Memory** is essential for building personalized assistants that remember users across conversations.
+- **Memory Stores** in LangGraph provide a clean abstraction for storing and retrieving memories.
+- **Namespace** helps organize memories hierarchically (like folders).
+- **Semantic search** retrieves relevant memories based on meaning, not keywords.
+- **Deduplication** prevents redundant memories by comparing with existing ones.
+- **Two-node workflow**: REMEMBER (write) → CHAT (read + respond).
+- **For production**, always use a persistent store (`PostgresStore`) instead of `InMemoryStore`.
+
+---
+
+## 12. More Useful topics to go through
+
+- **Advanced memory patterns** (episodic, semantic, procedural memory).
+- **Memory summarization** – compressing long memory stores.
+- **Memory expiration** – forgetting old or irrelevant memories.
+
+- Command to setup postgreSQL using Docker - `docker run --name langgraph-postgres -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=your_password -e POSTGRES_DB=postgres -p 5442:5432 -d postgres:16`
 
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
-
