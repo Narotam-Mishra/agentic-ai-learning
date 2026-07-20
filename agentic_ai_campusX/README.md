@@ -12592,4 +12592,8 @@ with PostgresStore.from_conn_string(DB_URI) as store:
 
 - Command to setup postgreSQL using Docker - `docker run --name langgraph-postgres -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=your_password -e POSTGRES_DB=postgres -p 5442:5432 -d postgres:16`
 
+---
+
+## 026. This AI Agent Plans, Researches & Writes Blogs Automatically using LangGraph | Agentic AI Project (01:20:03)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
