@@ -12596,4 +12596,459 @@ with PostgresStore.from_conn_string(DB_URI) as store:
 
 ## 026. This AI Agent Plans, Researches & Writes Blogs Automatically using LangGraph | Agentic AI Project (01:20:03)
 
+This tutorial covers the complete build of a **Planning AI Agent** – a blog writing agent that doesn't immediately jump to execution but first creates a structured plan and then executes it step by step. The agent includes:
+1. **Planning** – breaks a blog topic into sections.
+2. **Research** – searches the internet (via Tavily) when needed.
+3. **Parallel writing** – multiple workers write sections in parallel.
+4. **Image generation** – automatically adds relevant images using Gemini.
+5. **UI** – a Streamlit frontend for user interaction.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Planning Agent** | An AI agent that first creates a structured plan before executing a task, rather than jumping directly to execution. |
+| 2 | **Two-phase execution** | Phase 1: Plan (break task into sub-tasks). Phase 2: Execute (step-by-step). |
+| 3 | **Orchestrator-Worker pattern** | One orchestrator creates a plan; multiple workers execute sections in parallel. |
+| 4 | **Router** | Determines if internet research is needed for the given topic (Closed Book, Hybrid, Open Book modes). |
+| 5 | **Tavily search** | A search engine for LLMs – used to fetch up-to-date information from the internet. |
+| 6 | **Evidence Pack** | A collection of search results (title, URL, content) stored after research. |
+| 7 | **Fan-out mechanism** | Dynamically creates as many worker nodes as there are sections in the plan. |
+| 8 | **Reducer** | Merges all sections, inserts image placeholders, generates images via Gemini, and produces the final markdown file. |
+| 9 | **Pydantic schemas** | Used for structured outputs: Plan, Task, RouterDecision, EvidenceItem, EvidencePack, ImageSpec, GlobalImagePlan. |
+| 10 | **4-stage development** | Stage 1: Basic blog writer → Stage 2: Add research → Stage 3: Add images → Stage 4: Add UI. |
+
+---
+
+## 1. What Is a Planning Agent?
+
+A **Planning Agent** is an AI agent that does NOT immediately jump to answering/acting. Instead, it first creates a structured plan of what needs to be done, and then executes that plan step by step.
+
+### Direct Execution vs Planning
+
+| Aspect | Direct Execution | Planning Agent |
+|--------|------------------|----------------|
+| **Approach** | Starts working immediately | Creates a plan first |
+| **Quality** | May miss important aspects | Comprehensive coverage |
+| **Example** | "Write a blog on self-attention" → starts writing | First plans: title, audience, tone, sections, then writes each section |
+| **Complex tasks** | Prone to errors and omissions | Structured and thorough |
+
+---
+
+## 2. The Blog Writing Agent – Demo Overview
+
+**What it does:**
+- User provides a topic.
+- Agent creates a plan (title, audience, tone, sections with word counts, tags, research needs).
+- If the topic requires research (recent events), it searches the internet via Tavily.
+- Multiple workers write sections in parallel.
+- Images are automatically generated and inserted.
+- Final blog is saved as a markdown file.
+
+**Example output features:**
+- **Plan tab** – shows the complete plan (title, sections, word counts, tags).
+- **Blog tab** – shows the final blog with text, code blocks, and images.
+- **Evidence tab** – shows sources used (links, URLs).
+- **Images tab** – lists all generated images.
+- **Log tab** – shows the agent's decision-making process.
+
+---
+
+## 3. High-Level Architecture
+
+```
+START → Router → (if needs research) → Research (Tavily) → Orchestrator (Plan) → Fan-Out → Workers (Parallel) → Reducer → END
+                        │                     │
+                        └─────────────────────┘
+```
+
+| Node | Purpose |
+|------|---------|
+| **Router** | Determines if research is needed. Returns `needs_research` (bool), `mode` (closed_book/hybrid/open_book), and `queries`. |
+| **Research** | If needed, uses Tavily to search the internet with the provided queries. Stores results as `EvidencePack`. |
+| **Orchestrator** | Creates a structured plan (Plan object) with title, audience, tone, and a list of tasks (sections). |
+| **Fan-Out** | Dynamically creates one worker node for each task/section. |
+| **Workers** | Each worker writes one section of the blog. Workers run in parallel. |
+| **Reducer** | Merges all sections, adds image placeholders, generates images via Gemini, and outputs the final markdown file. |
+
+---
+
+## 4. Stage 1: Basic Blog Writing Agent (No Research, No Images)
+
+### Key Components
+
+**Pydantic Schemas:**
+
+```python
+from pydantic import BaseModel
+from typing import List, Optional
+
+class Task(BaseModel):
+    id: int
+    title: str
+    brief_description: str
+
+class Plan(BaseModel):
+    blog_title: str
+    tasks: List[Task]  # List of sections
+```
+
+**State:**
+
+```python
+from typing import TypedDict, Annotated, List
+from langgraph.graph.message import add_messages
+import operator
+
+class State(TypedDict):
+    topic: str
+    plan: Optional[Plan]
+    sections: Annotated[List[str], operator.add]  # Reducer: appends
+    final: str
+```
+
+**Orchestrator Node (creates plan):**
+
+```python
+def orchestrator_node(state: State):
+    # LLM with structured output (Plan schema)
+    plan_llm = llm.with_structured_output(Plan)
+    
+    prompt = """
+    Create a blog plan with 5-7 sections on the following topic.
+    Return a Plan object with blog_title and a list of Task objects.
+    Each Task should have id, title, and brief_description.
+    """
+    
+    plan = plan_llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=state["topic"])
+    ])
+    
+    return {"plan": plan}
+```
+
+**Worker Node (writes one section):**
+
+```python
+def worker_node(state: State, task: Task, topic: str, plan: Plan):
+    # Each worker writes one section
+    prompt = f"""
+    Write a clean markdown section for a blog.
+    Blog title: {plan.blog_title}
+    Topic: {topic}
+    Section title: {task.title}
+    Section description: {task.brief_description}
+    Return only the section content in markdown.
+    """
+    
+    response = llm.invoke(prompt)
+    return {"sections": [response.content]}  # Reducer appends to list
+```
+
+**Fan-Out Mechanism (creates dynamic workers):**
+
+```python
+from langgraph.types import Send
+
+def fan_out(state: State) -> List[Send]:
+    # Send one message to worker for each task in plan
+    sends = []
+    for task in state["plan"].tasks:
+        sends.append(Send("worker", {
+            "task": task,
+            "topic": state["topic"],
+            "plan": state["plan"]
+        }))
+    return sends
+```
+
+**Reducer Node:**
+
+```python
+def reducer_node(state: State):
+    # 1. Merge all sections
+    body = "\n\n".join(state["sections"])
+    
+    # 2. Create final markdown with title
+    blog_content = f"# {state['plan'].blog_title}\n\n{body}"
+    
+    # 3. Write to file
+    with open("blog.md", "w") as f:
+        f.write(blog_content)
+    
+    return {"final": blog_content}
+```
+
+---
+
+## 5. Stage 2: Adding Internet Research
+
+### Router Node
+
+The Router determines if research is needed and provides search queries.
+
+**Pydantic Schema:**
+
+```python
+class RouterDecision(BaseModel):
+    needs_research: bool
+    mode: Literal["closed_book", "hybrid", "open_book"]
+    queries: Optional[List[str]]  # If research needed
+```
+
+**Router Logic:**
+
+```python
+def router_node(state: State):
+    router_llm = llm.with_structured_output(RouterDecision)
+    
+    prompt = """
+    Analyze this topic and decide:
+    - closed_book: Evergreen topics (no research needed). Example: self-attention.
+    - hybrid: Mostly evergreen but needs recent examples/tools. Example: open-source LLMs.
+    - open_book: Volatile, needs recent data. Example: latest AI news.
+    
+    If research is needed, provide 3-10 specific search queries.
+    """
+    
+    decision = router_llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=state["topic"])
+    ])
+    
+    return {
+        "needs_research": decision.needs_research,
+        "mode": decision.mode,
+        "queries": decision.queries or []
+    }
+```
+
+### Research Node (with Tavily)
+
+```python
+from langchain_community.tools import TavilySearchResults
+
+# Create Tavily tool
+tavily = TavilySearchResults(max_results=6)
+
+def research_node(state: State):
+    evidence_items = []
+    
+    for query in state["queries"]:
+        # Perform search
+        results = tavily.invoke(query)
+        
+        for result in results:
+            evidence_items.append({
+                "title": result.get("title", ""),
+                "url": result.get("url", ""),
+                "content": result.get("content", ""),
+                "source": result.get("source", ""),
+                "publish_date": result.get("publish_date", None)
+            })
+    
+    # Deduplicate by URL and return as EvidencePack
+    return {"evidence": EvidencePack(items=evidence_items)}
+```
+
+**Evidence Pack Schema:**
+
+```python
+class EvidenceItem(BaseModel):
+    title: str
+    url: str
+    content: str
+    source: str
+    publish_date: Optional[str]
+
+class EvidencePack(BaseModel):
+    items: List[EvidenceItem]
+```
+
+### Updated Orchestrator (uses evidence)
+
+```python
+def orchestrator_node(state: State):
+    prompt = f"""
+    Create a blog plan based on:
+    - Topic: {state['topic']}
+    - Research evidence: {state.get('evidence', EvidencePack(items=[]))}
+    
+    Use the evidence to inform your plan, especially for recent facts and examples.
+    """
+    
+    # ... rest of orchestrator code
+```
+
+---
+
+## 6. Stage 3: Adding Images
+
+### The Image Generation Flow
+
+1. **Merge Content** – Combine all sections into a full markdown string.
+2. **Decide Images** – Send the markdown to an LLM to identify where images should go and generate prompts.
+3. **Generate & Place Images** – Use Gemini API to generate images and replace placeholders.
+
+### New Schemas
+
+```python
+class ImageSpec(BaseModel):
+    placeholder: str  # e.g., "{{image_1}}"
+    file_name: str    # e.g., "self_attention_diagram.png"
+    prompt: str       # Detailed prompt for image generation
+    size: str = "1024x1024"
+    quality: str = "high"
+
+class GlobalImagePlan(BaseModel):
+    markdown_with_placeholders: str
+    images: List[ImageSpec]
+```
+
+### Decide Images Node
+
+```python
+def decide_images_node(state: State):
+    # 1. Merge all sections
+    body = "\n\n".join(state["sections"])
+    full_markdown = f"# {state['plan'].blog_title}\n\n{body}"
+    
+    # 2. LLM decides where images should go
+    decide_llm = llm.with_structured_output(GlobalImagePlan)
+    
+    prompt = """
+    Review this blog and decide where images/diagrams would improve understanding.
+    Maximum 3 images per blog.
+    For each image, provide:
+    - A placeholder ({{image_X}})
+    - File name for the image
+    - A detailed prompt for image generation
+    """
+    
+    image_plan = decide_llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=full_markdown)
+    ])
+    
+    return {
+        "markdown_with_placeholders": image_plan.markdown_with_placeholders,
+        "image_specs": image_plan.images
+    }
+```
+
+### Generate & Place Images Node (using Gemini)
+
+```python
+import google.generativeai as genai
+
+def gemini_generate_image_bytes(prompt: str) -> bytes:
+    # Gemini API call to generate image
+    response = genai.Imagen.generate_image(prompt=prompt)
+    return response.image_bytes
+
+def generate_and_place_images_node(state: State):
+    markdown = state["markdown_with_placeholders"]
+    
+    for spec in state["image_specs"]:
+        # Generate image
+        image_bytes = gemini_generate_image_bytes(spec.prompt)
+        
+        # Save image
+        file_path = f"images/{spec.file_name}"
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+        
+        # Replace placeholder with markdown image tag
+        markdown = markdown.replace(
+            spec.placeholder,
+            f"![{spec.file_name}]({file_path})"
+        )
+    
+    # Write final markdown file
+    with open("blog_with_images.md", "w") as f:
+        f.write(markdown)
+    
+    return {"final": markdown}
+```
+
+### Reducer as Subgraph
+
+The reducer becomes a subgraph with three nodes:
+
+```
+Merge Content → Decide Images → Generate & Place Images
+```
+
+```python
+reducer_graph = StateGraph(ReducerState)
+reducer_graph.add_node("merge_content", merge_content_node)
+reducer_graph.add_node("decide_images", decide_images_node)
+reducer_graph.add_node("generate_images", generate_and_place_images_node)
+
+reducer_graph.add_edge(START, "merge_content")
+reducer_graph.add_edge("merge_content", "decide_images")
+reducer_graph.add_edge("decide_images", "generate_images")
+reducer_graph.add_edge("generate_images", END)
+
+# Add subgraph to main graph as a node
+main_graph.add_node("reducer", reducer_graph.compile())
+```
+
+---
+
+## 7. Stage 4: Streamlit UI
+
+The UI is built with Streamlit and includes:
+- **Topic input** – user enters blog topic with optional description.
+- **Blog generation** – button triggers the agent.
+- **Progress tracking** – shows which node is executing (Router, Research, Orchestrator, Workers, Reducer).
+- **Tabs** – Plan, Blog, Evidence, Images, Log.
+
+**Integration:**
+
+```python
+# backend.py – contains the compiled graph
+from backend import app
+
+# streamlit_app.py
+import streamlit as st
+from backend import app
+
+def generate_blog(topic):
+    config = {"configurable": {"thread_id": "unique_id"}}
+    result = app.invoke({"topic": topic}, config=config)
+    return result["plan"], result["final"], result.get("evidence"), result.get("image_specs")
+```
+
+---
+
+## 8. Summary Table: Stage Evolution
+
+| Stage | Features Added | Key Components |
+|-------|----------------|----------------|
+| **Stage 1** | Basic blog writer | Orchestrator + Workers + Reducer |
+| **Stage 2** | Internet research | Router + Research (Tavily) + Evidence Pack |
+| **Stage 3** | Image generation | Image schemas + Gemini API + Reducer subgraph |
+| **Stage 4** | User Interface | Streamlit UI with progress tracking |
+
+---
+
+## 9. Key Takeaways
+
+- **Planning agents** are essential for complex tasks – they break work into structured sub-tasks before execution.
+- **Orchestrator-Worker pattern** enables parallel execution – each section is written independently by a separate worker.
+- **Fan-out** dynamically creates workers based on the plan – you don't know the number of sections in advance.
+- **Router** intelligently decides if research is needed – saving time and cost for evergreen topics.
+- **Tavily** provides up-to-date internet search for LLMs – essential for recent events and news.
+- **Reducers** can be subgraphs – the reducer itself becomes a graph with multiple nodes for merging, deciding images, and generating images.
+- **Structured output** (Pydantic) is used extensively – ensures the LLM returns data in a predictable format.
+- **The agent is production-ready** – with research, images, persistence, and a polished UI.
+
+---
+
+## 027. Advanced RAG: How Corrective RAG (CRAG) Solves Traditional RAG Problems (1:15:08)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
