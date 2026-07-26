@@ -128,20 +128,26 @@ def route_next(state: State) -> str:
 # step 4 - perform research (using Tavily)
 def _tavily_search(query: str, max_results: int = 5) -> List[dict]:
     tool = TavilySearch(max_results=max_results)
-    results = tool.invoke({
+
+    response = tool.invoke({
         "query": query
     })
 
+    results = response.get("results", [])
+
     normalized: List[dict] = []
-    for res in results or []:
+
+    for res in results:
         normalized.append(
             {
                 "title": res.get("title") or "",
                 "url": res.get("url") or "",
-                "snippet": res.get("content") or res.get("published_at"),
+                "snippet": res.get("content"),
+                "published_at": res.get("published_at"),
                 "source": res.get("source"),
             }
         )
+
     return normalized
 
 RESEARCH_SYSTEM = """You are a research synthesizer for technical writing.
@@ -377,7 +383,7 @@ g.add_edge("reducer", END)
 app = g.compile()
 
 # out = app.invoke({
-#     "topic": "Write a blog on Large Language Model",
+#     "topic": "State of Multimodal LLM in 2026",
 #     "sections": []
 # })
 
