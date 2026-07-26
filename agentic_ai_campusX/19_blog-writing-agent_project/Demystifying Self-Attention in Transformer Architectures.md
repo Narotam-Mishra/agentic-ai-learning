@@ -1,567 +1,761 @@
 # Demystifying Self-Attention in Transformer Architectures
 
-> **[IMAGE GENERATION FAILED]** Connectivity and path lengths for RNNs, CNNs, and self-attention over a 5-token sequence. Self-attention provides direct pairwise edges between all tokens within one layer.
+## From Recurrent Models to Self-Attention: Why Transformers Needed a New Core
+
+> **[IMAGE GENERATION FAILED]** RNNs pass information through a chain, CNNs use local fixed windows, while self-attention allows every token to connect directly to every other token in a single layer.
 >
-> **Alt:** Diagram comparing RNN, CNN, and self-attention connectivity patterns over a short sequence
+> **Alt:** Diagram comparing RNN, CNN, and self-attention connectivity for a short sentence
 >
-> **Prompt:** Side-by-side technical diagram with three panels labeled RNN, CNN, and Self-Attention. Each panel shows five token nodes in a row (t1–t5). RNN panel: arrows only from left to right connecting consecutive tokens, with a highlighted long path from t1 to t5 going through all intermediates. CNN panel: local window connections (e.g., kernel size 3) with overlapping receptive fields; long-range interaction from t1 to t5 requires multiple stacked layers indicated schematically. Self-Attention panel: every token connected to every other token with faint directed edges, and a highlighted direct edge from t1 to t5 to emphasize constant path length. Clean, minimal, vector-style, white background, readable labels.
+> **Prompt:** clean technical diagram with three panels labeled RNN, CNN, Self-Attention, each panel showing the same short sequence of 6 tokens. RNN panel: arrows only from token t-1 to t along the sequence. CNN panel: each token connected to a small local neighborhood (e.g., window size 3) with fixed pattern. Self-Attention panel: dense all-to-all connections between tokens (faint gray lines), highlighting that every token can directly attend to every other token. Minimal, monochrome or two-color scheme, suitable for a machine learning blog, no decorative elements.
 >
-> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.5-flash-preview-image\nPlease retry in 49.776915487s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '49s'}]}}
+> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing. Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay. ', 'status': 'RESOURCE_EXHAUSTED'}}
 
 
-## Why Self-Attention? From RNN Limits to Transformer Intuition
+RNNs and CNNs were the dominant tools for sequence modeling before Transformers.
 
-RNNs and CNNs both struggle with **long-range dependencies** in sequences, but for different structural reasons.
+- **RNNs** process inputs step by step. At time step *t*, the hidden state depends on step *t–1*. This gives them an implicit notion of order, but:
+  - Long-range dependencies must be carried through many recurrent updates, leading to vanishing/exploding gradients and information loss.
+  - Computation is inherently **sequential**: you can’t process token *t* before token *t–1*, which limits parallelism.
 
-RNNs process tokens one step at a time, passing a hidden state forward. In theory, this state can carry information arbitrarily far. In practice, gradients vanish or explode over long chains, and the model is biased toward recent context. Even gated variants (LSTMs/GRUs) still rely on a single, compressed state vector to summarize everything seen so far. If token *i* needs information from token *j* far away, that information must flow through every intermediate step.
+- **CNNs for sequences** (1D convolutions) process multiple positions in parallel, but each layer has a **fixed receptive field** (e.g., kernel size 3). To connect distant tokens, you stack many layers or use dilations:
+  - Long-range interactions require depth and careful design of dilation patterns.
+  - The connectivity is mostly **static** and position-local, not directly conditioned on the specific content at each position.
 
-CNNs remove sequential recurrence and allow parallel computation, but each convolution only sees a local window. Capturing long context requires stacking many layers or using dilated kernels. The “effective receptive field” grows, yet interactions between distant positions are still indirect and mediated by multiple layers of local operations.
+### A concrete example: “long-distance” interaction
 
-Self-attention replaces these indirect pathways with **direct pairwise interactions** between all positions in a sequence. Each position can “look at” every other position in a single layer, computing attention weights that say “how relevant is token *j* to token *i* right now?” No matter how far apart tokens are, the path length between them (in terms of computation graph hops) is 1 per layer.
+Consider the sentence:
 
-This change also transforms how we use hardware. RNNs are **inherently sequential**: each step depends on the previous hidden state, limiting both training and inference throughput. CNNs allow more parallelism across positions, but depth still introduces some sequential dependence across layers.
+> “If the deployment fails, **roll back**.”
 
-Self-attention, by contrast, lets you process all positions in a layer **in parallel**:
+The word “If” at the beginning and the phrase “roll back” at the end are tightly coupled: “roll back” is conditional on “If the deployment fails”.
 
-- For a given sequence, you compute queries/keys/values for all tokens at once.
-- The attention matrix (all pairwise scores) is computed as large batched matrix multiplications, which map well to GPUs/TPUs.
-- There’s no time-step loop inside a layer, only a depth-wise loop across layers.
+- In an **RNN**, information must flow:
+  - “If” → “the” → “deployment” → “fails,” → “roll” → “back”.
+  - To decide how to interpret “roll back”, the model relies on the hidden state that has been passed through all intermediate tokens. That’s multiple recurrent transitions where signal can degrade.
 
-The result is higher throughput and better hardware utilization, especially for long sequences where the parallelism over positions is substantial. The main trade-off is quadratic cost in sequence length for dense self-attention, which we’ll revisit later.
+- In a **self-attention layer**, when computing the representation for “roll” or “back”, the model can directly “look at” all tokens, including “If”, in a *single* step. There is no need for a multi-hop chain just to connect distant positions.
 
-Conceptually, self-attention turns the sequence into a **fully connected directed graph** at each layer:
+This is a core motivation: **any token can directly consult any other token in O(1) layers**, regardless of distance in the sequence.
 
-- Nodes = token representations.
-- Edges = attention scores from one token to another.
-- Edge weights are **content-dependent**: they’re computed from the current token embeddings, not from fixed distances or kernel shapes.
+### What “attention” means at a high level
 
-Each layer refines this graph: tokens rewrite their representations as a weighted sum of information from their neighbors in this learned graph.
+Self-attention is a learned, content-dependent **weighted aggregation of all tokens**, conditioned on a particular “query” token.
 
-It’s also useful to distinguish **self-attention** from **cross-attention**:
+Conceptually, for each token \(i\):
 
-- Self-attention: queries, keys, and values all come from the **same** sequence. This is what lets a sentence “reason about itself.”
-- Cross-attention: queries come from one sequence (e.g., a decoder), keys/values from another (e.g., an encoder). This is used for sequence-to-sequence tasks like translation.
+1. Compute a **query** vector \(q_i\).
+2. For every token \(j\), compute a **key** \(k_j\) and **value** \(v_j\).
+3. Compute similarity scores \(s_{ij} = q_i \cdot k_j\), normalize them (softmax), and use them as weights.
+4. The new representation of token \(i\) is a **weighted sum** of all \(v_j\), where weights encode “how relevant is token \(j\) to token \(i\)?”.
 
-This article focuses on **self-attention within a single sequence**, because that’s the core building block that replaces RNN/CNN mechanisms for modeling contextual relationships.
+All tokens do this in parallel, so in one layer each token can pull information from everywhere in the sequence.
 
-One subtle but crucial property: self-attention is **permutation-equivariant** over positions. If you shuffle the tokens and apply the same self-attention layer, the outputs are shuffled in the same way. The mechanism itself does not know about order; it only knows about pairwise content relationships.
+### Encoder-only, decoder-only, and encoder–decoder: self-attention’s roles
 
-To make the model sensitive to word order or token position, we must **inject positional information separately** (e.g., via positional encodings added to the input embeddings). Without this, a Transformer could not distinguish “dog bites man” from “man bites dog” purely from self-attention.
-
-## Unpacking the Self-Attention Mechanism: Queries, Keys, and Values
-
-> **[IMAGE GENERATION FAILED]** Dataflow in single-head scaled dot-product self-attention: from input sequence X to Q, K, V projections, score matrix, softmax weights, and the final weighted value sums.
+> **[IMAGE GENERATION FAILED]** Self-attention appears in encoder-only stacks (bidirectional), decoder-only stacks (causal), and encoder–decoder models where decoder self-attention is combined with cross-attention to encoder outputs.
 >
-> **Alt:** Flow diagram of single-head self-attention from input X through Q, K, V projections to attention weights and output
+> **Alt:** High-level diagram of encoder-only, decoder-only, and encoder–decoder Transformer stacks with self-attention and cross-attention
 >
-> **Prompt:** Technical block diagram of single-head scaled dot-product self-attention. Start with a matrix X (shape B×L×D_model) on the left. From X, three arrows go into three linear blocks labeled W_Q, W_K, W_V producing Q, K, V (with their shapes indicated). Q and K feed into a matrix multiply block labeled Q K^T / sqrt(d_k), outputting a scores matrix (L×L). This goes into a softmax block over the last dimension, producing attention weights (L×L). The weights then multiply V in another matmul block to produce output O (B×L×d_head). Show tensor shapes near each stage and arrows indicating flow. Clean, uncluttered, white background.
+> **Prompt:** technical block diagram comparing three Transformer variants side by side: Encoder-only, Decoder-only, Encoder–Decoder. Each variant drawn as a vertical stack of layers. For Encoder-only: single stack labeled Encoder with bidirectional self-attention blocks over input tokens. For Decoder-only: single stack labeled Decoder with causal self-attention blocks over generated tokens. For Encoder–Decoder: left stack labeled Encoder with self-attention over source tokens, right stack labeled Decoder with self-attention over target tokens plus cross-attention blocks that take encoder outputs as keys and values. Use arrows to indicate flow of queries, keys, and values conceptually but keep text minimal, clean style.
 >
-> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.5-flash-preview-image\nPlease retry in 49.3308603s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '49s'}]}}
+> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing. Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay. ', 'status': 'RESOURCE_EXHAUSTED'}}
 
 
-At a single layer, self-attention takes a sequence of vectors and returns a sequence of *contextualized* vectors of the same length.
+Self-attention is the same core mechanism, deployed in different ways:
 
-### From inputs to Q, K, V
+- **Encoder-only** (e.g., for classification, embeddings):
+  - You have an input sequence (text, code, etc.).
+  - Each layer uses **bidirectional self-attention** over the entire input.
+  - Goal: produce rich contextual representations of each token (or a pooled representation of the whole sequence).
 
-Assume a batch of input sequences already embedded and (optionally) position-encoded:
+- **Decoder-only** (e.g., autoregressive language models):
+  - The model generates tokens left-to-right.
+  - Each layer uses **causal self-attention**: token *t* can attend only to tokens ≤ *t*.
+  - Goal: predict the next token given all prior ones, with direct access to *all* previous positions.
 
-- Shape: `X ∈ ℝ^{B × L × D_model}`
-  - `B`: batch size  
-  - `L`: sequence length  
-  - `D_model`: model (embedding) dimension
+- **Encoder–decoder** (e.g., classic sequence-to-sequence):
+  - Encoder: same as encoder-only, builds source-sequence representations using self-attention.
+  - Decoder: uses **self-attention over generated tokens so far**, plus **cross-attention** to the encoder’s outputs.
+  - Goal: map one sequence to another, letting each generated token attend both to prior outputs and all input tokens.
 
-Self-attention first computes **queries**, **keys**, and **values** via learned linear projections:
+### Self-attention as learned connectivity
 
-- Weight matrices:
-  - `W_Q ∈ ℝ^{D_model × D_k}`
-  - `W_K ∈ ℝ^{D_model × D_k}`
-  - `W_V ∈ ℝ^{D_model × D_v}`
+RNNs impose a **fixed chain** of information flow, and CNNs impose a **fixed local neighborhood**. Self-attention instead lets the model **learn a data-dependent connectivity pattern**:
 
-For each token vector `x_t`:
+- For each token, the model decides which other tokens matter *for this example*.
+- This pattern is recomputed at every layer, enabling complex relational structures to form in a few layers.
+- Long-range and local dependencies are treated uniformly: “distance” in the input sequence doesn’t restrict who can talk to whom.
 
-- `q_t = x_t W_Q`
-- `k_t = x_t W_K`
-- `v_t = x_t W_V`
+This shift—from rigid, position-driven connections to **flexible, content-driven connections**—is why self-attention became the new core of Transformer architectures.
 
-In batched tensor form:
+## Mechanics of Self-Attention: Queries, Keys, Values, and Weights
 
-- `Q = X W_Q` → shape `B × L × D_k`
-- `K = X W_K` → shape `B × L × D_k`
-- `V = X W_V` → shape `B × L × D_v`
+> **[IMAGE GENERATION FAILED]** Scaled dot-product self-attention for a single head: input X is projected to Q, K, V, scores QKᵀ are scaled, masked, passed through softmax to get attention A, and finally multiplied by V to produce output O.
+>
+> **Alt:** Flow diagram of scaled dot-product self-attention from X to Q, K, V to attention weights and output O
+>
+> **Prompt:** step-by-step flow diagram for single-head scaled dot-product self-attention. Start with matrix X on the left, arrows into three linear projection blocks labeled W_Q, W_K, W_V producing Q, K, V. From Q and K arrows into a node labeled Q K^T / sqrt(d_k) producing a scores matrix. Next box for optional Masking, then a Softmax box producing attention matrix A. Finally, arrow from A and V into a node labeled A V giving output O. Show matrix shapes lightly annotated, e.g., (T, d_model), (T, d_k), (T, T), (T, d_v). Clean, minimalist, vector-style graphic on light background, no decorative icons.
+>
+> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing. Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay. ', 'status': 'RESOURCE_EXHAUSTED'}}
 
-In multi-head attention, `D_k = H * d_head` and similarly for `D_v`, then you reshape to:
 
-- `Q, K, V`: `B × H × L × d_head`
+At the level of a single attention head, self-attention is just a series of batched matrix multiplications and elementwise operations.
 
-### Scaled dot-product attention scores
+### Input representation: the X matrix
 
-For a given head, attention scores are pairwise dot products between queries and keys:
+Assume we have:
 
-- For each sequence in the batch, for each head:
-  - `scores[i, j] = q_i ⋅ k_j`  for `i, j ∈ {1…L}`
+- batch size: `B`
+- sequence length: `T`
+- embedding dimension: `d_model`
 
-In tensor notation (single head):
+We collect token embeddings into a tensor:
 
-- `Q ∈ ℝ^{B × L × d_head}`
-- `K ∈ ℝ^{B × L × d_head}`
-- `scores = Q K^T` → shape `B × L × L`
+- `X` with shape `(B, T, d_model)`
 
-To avoid large magnitudes (and thus overly peaked softmax and unstable gradients when `d_head` is large), scores are **scaled**:
+Typically, `X` is the sum of token embeddings and positional encodings, and it flows into a single self-attention layer as the input that will be mixed across positions.
 
-- `scores = (Q K^T) / sqrt(d_head)`
+For many implementations, computations are done per batch, but conceptually you can think in terms of one sequence:
 
-This scaling keeps the variance of the scores roughly constant as `d_head` grows, preventing gradients from vanishing/exploding due to softmax saturation.
+- `X` (for one sequence) is a matrix of shape `(T, d_model)`
+- the `t`‑th row `X[t]` is the embedding of token `t`.
 
-### From scores to weighted sums
+### Q, K, V projections
 
-To turn scores into **attention weights**, apply a row-wise softmax over the key dimension:
+A single attention head uses three learned linear projections:
 
-- For each query position `i`:
-  - `α_i = softmax(scores[i, :])`
-  - `α_i ∈ ℝ^{L}`, `∑_j α_i[j] = 1`
+- `W_Q` of shape `(d_model, d_k)`
+- `W_K` of shape `(d_model, d_k)`
+- `W_V` of shape `(d_model, d_v)`
 
-Tensor-wise:
+Typical choice: `d_k = d_v = d_model / num_heads`, but that’s a design choice.
 
-- `α = softmax(scores, dim=-1)` → shape `B × L × L`
+We compute:
 
-Then compute a weighted sum of values:
+- `Q = X · W_Q` → shape `(T, d_k)`
+- `K = X · W_K` → shape `(T, d_k)`
+- `V = X · W_V` → shape `(T, d_v)`
 
-- `output[i] = ∑_j α_i[j] v_j`
+Batched, with shapes:
 
-In tensors:
+- `X`: `(B, T, d_model)`
+- `W_Q`: `(d_model, d_k)` ⇒ `Q`: `(B, T, d_k)`
+- `W_K`: `(d_model, d_k)` ⇒ `K`: `(B, T, d_k)`
+- `W_V`: `(d_model, d_v)` ⇒ `V`: `(B, T, d_v)`
 
-- `V ∈ ℝ^{B × L × d_head}`
-- `O = α V` → matrix multiplication over the `L` dimension
-  - `O ∈ ℝ^{B × L × d_head}`
+Each token’s embedding is mapped to a query vector, a key vector, and a value vector.
 
-For multi-head attention, you do this per head:
+### Computing attention scores and weights
 
-- `Q, K, V ∈ ℝ^{B × H × L × d_head}`
-- `scores = (Q @ K.transpose(-2, -1)) / sqrt(d_head)`  
-  → `B × H × L × L`
-- `α = softmax(scores, dim=-1)`  
-  → `B × H × L × L`
-- `O = α @ V`  
-  → `B × H × L × d_head`
+For one sequence (drop batch index), self-attention between all token positions is:
 
-Then you reshape/concatenate heads:
+1. **Raw scores**  
+   Compute similarity between each query and each key:
 
-- `O_merged ∈ ℝ^{B × L × (H * d_head)}`  
-- Final linear projection with `W_O ∈ ℝ^{(H * d_head) × D_model}` brings it back to `B × L × D_model`.
+   \[
+   S = Q K^\top
+   \]
 
-### Masking: causality and padding
+   - `Q`: `(T, d_k)`
+   - `K^T`: `(d_k, T)`
+   - `S`: `(T, T)` where `S[i, j]` is the score of token `i` attending to token `j`.
 
-Before softmax, you can inject masks into `scores` to control which tokens attend to which:
+2. **Scaling**  
+   To stabilize gradients when `d_k` is large:
 
-- **Padding mask**: prevent attention to padded positions.
-  - Mask `M_pad ∈ {0, -∞}^{B × 1 × 1 × L}` (broadcast across query positions and heads).
-- **Causal mask**: enforce that position `i` can only attend to `j ≤ i`.
-  - Mask `M_causal ∈ {0, -∞}^{1 × 1 × L × L}`, with `-∞` above the diagonal.
+   \[
+   \tilde{S} = \frac{S}{\sqrt{d_k}}
+   \]
 
-You combine and add to scores:
+3. **Masking (optional but common)**  
+   - **Causal mask** (decoder): disallow attending to “future” tokens (`j > i`) by setting those scores to a large negative number (e.g., `-1e9`).
+   - **Padding mask**: disallow attending to padded positions.
 
-- `scores_masked = scores + M`
+   Conceptually:
 
-Entries with `-∞` become near-zero after softmax, effectively ignored.
+   \[
+   \tilde{S}_{\text{masked}}[i, j] =
+   \begin{cases}
+   \tilde{S}[i, j] & \text{if allowed}\\
+   -\infty & \text{if masked}
+   \end{cases}
+   \]
 
-### Minimal code sketch (single head)
+4. **Softmax → attention weights**  
+   Apply softmax row-wise over the last dimension (across `j` for each `i`):
+
+   \[
+   A[i, j] = \frac{\exp(\tilde{S}_{\text{masked}}[i, j])}{\sum_{k=1}^{T} \exp(\tilde{S}_{\text{masked}}[i, k])}
+   \]
+
+   - `A`: `(T, T)`  
+   Each row `A[i]` is a probability distribution over all positions `j` that token `i` can attend to.
+
+### Output: mixing values with attention weights
+
+The head’s output is a weighted sum of the values for each token:
+
+\[
+O = A V
+\]
+
+- `A`: `(T, T)`
+- `V`: `(T, d_v)`
+- `O`: `(T, d_v)`
+
+Row-wise interpretation for token `i`:
+
+\[
+O[i] = \sum_{j=1}^{T} A[i, j] \cdot V[j]
+\]
+
+So the new representation of token `i` is a mixture of value vectors from all positions, weighted by how much `i` attends to them.
+
+Batched shapes:
+
+- `A`: `(B, T, T)`
+- `V`: `(B, T, d_v)`
+- `O`: `(B, T, d_v)`
+
+This `O` is the per-head output, which in a full multi-head module would be concatenated across heads and linearly projected back to `d_model`.
+
+### Minimal code sketch for a single head (no masks)
 
 ```python
 import torch
 import math
 
-def self_attention(X, W_Q, W_K, W_V, mask=None):
-    # X: [B, L, D_model]
-    B, L, D_model = X.shape
-    d_head = W_Q.shape[-1]
+def single_head_self_attention(X, W_Q, W_K, W_V):
+    # X: (B, T, d_model)
+    # W_Q, W_K, W_V: (d_model, d_k/d_v)
+    Q = X @ W_Q  # (B, T, d_k)
+    K = X @ W_K  # (B, T, d_k)
+    V = X @ W_V  # (B, T, d_v)
 
-    Q = X @ W_Q   # [B, L, d_head]
-    K = X @ W_K   # [B, L, d_head]
-    V = X @ W_V   # [B, L, d_head]
+    # scores: (B, T, T)
+    scores = Q @ K.transpose(-2, -1)
+    scores = scores / math.sqrt(Q.size(-1))
 
-    scores = Q @ K.transpose(-2, -1)  # [B, L, L]
-    scores = scores / math.sqrt(d_head)
+    # attention weights: (B, T, T)
+    A = torch.softmax(scores, dim=-1)
 
-    if mask is not None:
-        # mask: [B, 1, L] or [B, L, L], pre-broadcasted to [B, L, L]
-        scores = scores + mask  # e.g., 0 or -1e9 in masked positions
-
-    weights = torch.softmax(scores, dim=-1)  # [B, L, L]
-    O = weights @ V  # [B, L, d_head]
+    # output: (B, T, d_v)
+    O = A @ V
     return O
 ```
 
-### Edge cases and performance notes
+### Why it’s called “self”-attention
 
-- **Very long sequences**: `scores` is `O(L²)` in memory and compute. Long `L` may require approximations or memory-efficient kernels.
-- **Extreme score magnitudes**: insufficient scaling or missing mask can cause `NaN` after softmax; using large negative values (not `-inf` literal in some backends) for masks is common to avoid numerical issues.
-- **Broadcasting bugs**: masks with incorrect shape (e.g., `[B, L]` where `[B, 1, 1, L]` is expected) can silently produce wrong patterns of attention; always check final `scores.shape` and `mask.shape`.
+In **self-attention**, the same sequence `X` generates:
 
-## Multi-Head Self-Attention: Why One Head Isn’t Enough
+- queries (`Q`)
+- keys (`K`)
+- values (`V`)
 
-> **[IMAGE GENERATION FAILED]** Multi-head self-attention: multiple parallel attention heads operate on the same input X in different subspaces, and their outputs are concatenated and linearly projected back to the model dimension.
->
-> **Alt:** Diagram of multi-head self-attention showing parallel heads and concatenation back to model dimension
->
-> **Prompt:** Architectural diagram of multi-head self-attention. On the left, an input tensor X (B×L×d_model). It fans out into h parallel branches labeled Head 1, Head 2, ..., Head h. Each branch contains a small box labeled Q,K,V + scaled dot-product attention, with input shape B×L×d_head and output B×L×d_head. All head outputs then converge into a concat block forming B×L×(h·d_head), followed by a linear projection block W_O back to B×L×d_model. Indicate dimensions near tensors and use clear labels. Clean vector style on white background.
->
-> **Error:** 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-flash-preview-image\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.5-flash-preview-image\nPlease retry in 48.916550255s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash-preview-image', 'location': 'global'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash-preview-image'}}, {'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_input_token_count', 'quotaId': 'GenerateContentInputTokensPerModelPerMinute-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash-preview-image', 'location': 'global'}}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '48s'}]}}
+So each token attends to **itself and other tokens in the same sequence**.
 
+In **cross-attention**, queries and key/values come from *different* sources:
 
-A single self-attention head takes an input sequence of hidden states and produces a new sequence where each position is a weighted mix of all positions.
+- `Q` from a **target** sequence (e.g., decoder hidden states)
+- `K` and `V` from a **source** sequence or another modality (e.g., encoder outputs, image features)
 
-Let the input be:
+The mechanics (QKᵀ, softmax, AV) are identical; only the origin of Q vs. K/V differs.
 
-- Shape: `(batch_size, seq_len, d_model)`
-
-A single head uses three learned linear maps:
-
-- `W_Q ∈ ℝ^{d_model × d_k}`
-- `W_K ∈ ℝ^{d_model × d_k}`
-- `W_V ∈ ℝ^{d_model × d_v}`
-
-Compute:
-
-- `Q = X W_Q` → `(batch, seq_len, d_k)`
-- `K = X W_K` → `(batch, seq_len, d_k)`
-- `V = X W_V` → `(batch, seq_len, d_v)`
-
-Then scaled dot-product attention:
-
-- Scores: `S = Q Kᵀ / sqrt(d_k)` → `(batch, seq_len, seq_len)`
-- Weights: `A = softmax(S, dim=-1)`
-- Output: `O = A V` → `(batch, seq_len, d_v)`
-
-Multi-head self-attention just replicates this structure `h` times in parallel, each with its own parameters:
-
-- For head `i`:
-  - `W_Q^i, W_K^i, W_V^i` all independent
-- Each head sees the same `X` but projects it into a different learned subspace.
-
-Intuitively, each head can specialize:
-
-- One head might focus on local patterns (nearby tokens).
-- Another on long-range dependencies.
-- Others on syntactic roles (subject–verb links) vs. semantic similarity (coreference, topic).
-
-Because each head has its own projections, these “views” are linearly separated and can evolve independently during training, instead of forcing a single attention map to encode all relationships at once.
-
-After computing per-head outputs:
-
-- `O_i` for head `i` has shape `(batch, seq_len, d_v)`
-- Concatenate along the feature dimension:
-
-  - `O_concat = concat(O_1, …, O_h)` → `(batch, seq_len, h * d_v)`
-
-Then project back to the model dimension:
-
-- `W_O ∈ ℝ^{(h * d_v) × d_model}`
-- Final output: `Y = O_concat W_O` → `(batch, seq_len, d_model)`
-
-This preserves the original dimensionality while letting the model mix information across heads.
-
-**Trade-offs:**
-
-- Parameters:
-  - Each head adds its own `W_Q^i, W_K^i, W_V^i`.
-  - Total parameters grow roughly linearly with `h` (for fixed `d_k`, `d_v`), or stay similar if `d_k`, `d_v` shrink as `h` grows (common in practice).
-- Compute:
-  - Attention scores scale as `O(h * seq_len² * d_k)`.
-  - More heads → more FLOPs and memory for attention matrices.
-- Benefits:
-  - Higher modeling capacity: multiple, specialized attention patterns.
-  - Optimization: easier for SGD/Adam to “assign” roles to heads than to force one large attention map to do everything, which can lead to entangled gradients and slower convergence.
-
-Typical configurations pick:
-
-- `d_model` divisible by the number of heads, `h` (e.g., 4, 8, 12, 16,…).
-- Per-head dimension `d_k = d_v = d_model / h`.
-- This keeps `h * d_v = d_model`, so parameter count and compute remain balanced while enabling parallelism.
-- Choosing `h` and `d_k` as multiples of 8/16 helps align with vector widths and tensor-core layouts, improving memory access patterns and throughput.
-
-Conceptually:
-
-- Too few heads: bottlenecked expressiveness; one head must mix many distinct relationships.
-- Too many heads (with very small `d_k`): each head is too “thin” to capture rich structure; overhead from per-head operations increases.
-
-A minimal code sketch:
+## Minimal Self-Attention Implementation: A Single-Head PyTorch Sketch
 
 ```python
-import torch
-import torch.nn as nn
-import math
-
-class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
-        super().__init__()
-        assert d_model % num_heads == 0
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.d_head = d_model // num_heads
-
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
-
-    def forward(self, x):
-        B, T, _ = x.shape  # batch, seq_len, d_model
-
-        # project to Q, K, V of shape (B, num_heads, T, d_head)
-        q = self.W_q(x).view(B, T, self.num_heads, self.d_head).transpose(1, 2)
-        k = self.W_k(x).view(B, T, self.num_heads, self.d_head).transpose(1, 2)
-        v = self.W_v(x).view(B, T, self.num_heads, self.d_head).transpose(1, 2)
-
-        # scaled dot-product attention per head
-        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_head)  # (B, h, T, T)
-        attn = torch.softmax(scores, dim=-1)
-        out = attn @ v  # (B, h, T, d_head)
-
-        # combine heads: (B, T, h * d_head) == (B, T, d_model)
-        out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
-        return self.W_o(out)
-```
-
-This layout (batch × heads × seq × head_dim) is designed to match hardware-friendly tensor operations while exposing the benefits of multi-head specialization.
-
-## A Minimal Self-Attention Implementation: From Equations to Code
-
-Below is a compact, framework-style sketch in PyTorch-like pseudocode. The goal is to mirror the equations while making shapes and data flow very explicit.
-
-### Scaled Dot-Product Attention
-
-```python
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, dropout_p: float = 0.0):
+class SingleHeadSelfAttention(nn.Module):
+    def __init__(self, d_model: int, d_head: int, causal: bool = False):
         super().__init__()
-        self.dropout = nn.Dropout(dropout_p) if dropout_p > 0 else None
+        self.d_model = d_model
+        self.d_head = d_head
+        self.causal = causal
 
-    def forward(self, Q, K, V, mask=None):
+        # Linear projections for Q, K, V.
+        # Input: (..., d_model) → Output: (..., d_head)
+        self.W_Q = nn.Linear(d_model, d_head, bias=False)
+        self.W_K = nn.Linear(d_model, d_head, bias=False)
+        self.W_V = nn.Linear(d_model, d_head, bias=False)
+
+        # Optional output projection back to d_model
+        self.W_O = nn.Linear(d_head, d_model, bias=False)
+
+    def forward(self, x, attn_mask: torch.Tensor | None = None):
         """
-        Q: (batch, seq_q, d_k)
-        K: (batch, seq_k, d_k)
-        V: (batch, seq_k, d_v)
-        mask: (batch, 1, seq_q, seq_k) or (batch, seq_q, seq_k), with 0 for masked positions
+        x: (batch_size, seq_len, d_model)
+        attn_mask: optional mask broadcastable to (batch_size, 1, seq_len, seq_len)
+                   where 0 = keep, -inf (or very negative) = mask out.
         """
-        d_k = Q.size(-1)
+        B, T, _ = x.shape
 
-        # (batch, seq_q, d_k) @ (batch, d_k, seq_k) -> (batch, seq_q, seq_k)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+        # Project to Q, K, V: (B, T, d_head)
+        Q = self.W_Q(x)
+        K = self.W_K(x)
+        V = self.W_V(x)
 
-        if mask is not None:
-            # Ensure broadcastable; mask == 0 gets large negative
-            while mask.dim() < scores.dim():
-                mask = mask.unsqueeze(1)
-            scores = scores.masked_fill(mask == 0, float("-inf"))
+        # Compute attention scores.
+        # Step 1: add a "heads" dim (here =1) so shapes are:
+        # Q: (B, 1, T, d_head), K: (B, 1, T, d_head)
+        Qh = Q.unsqueeze(1)
+        Kh = K.unsqueeze(1)
 
-        attn = F.softmax(scores, dim=-1)  # along seq_k dimension
+        # Step 2: scores = Q * K^T over d_head:
+        # scores: (B, 1, T_query, T_key) = (B, 1, T, T)
+        scores = torch.matmul(Qh, Kh.transpose(-2, -1)) / (self.d_head ** 0.5)
 
-        if self.dropout is not None:
-            attn = self.dropout(attn)
+        # Optional causal mask: prevent attending to future positions.
+        if self.causal:
+            # causal_mask: (T, T) with 0 on allowed, -inf on disallowed.
+            causal_mask = torch.full((T, T), float("-inf"), device=x.device)
+            causal_mask = torch.triu(causal_mask, diagonal=1)
+            # Broadcast to (1, 1, T, T) → (B, 1, T, T)
+            scores = scores + causal_mask
 
-        # (batch, seq_q, seq_k) @ (batch, seq_k, d_v) -> (batch, seq_q, d_v)
-        output = torch.matmul(attn, V)
-        return output, attn
+        # Optional external attention mask (e.g., padding).
+        if attn_mask is not None:
+            # attn_mask should already be broadcastable to scores.shape
+            # Typical shape: (B, 1, 1, T) or (B, 1, T, T)
+            scores = scores + attn_mask
+
+        # Softmax over key dimension (last dim) → weights sum to 1 across keys.
+        # attn_weights: (B, 1, T_query, T_key)
+        attn_weights = F.softmax(scores, dim=-1)
+
+        # Weighted sum of values.
+        # Vh: (B, 1, T_value, d_head)
+        Vh = V.unsqueeze(1)
+        # out_head: (B, 1, T_query, d_head)
+        out_head = torch.matmul(attn_weights, Vh)
+        # Remove heads dim: (B, T, d_head)
+        out = out_head.squeeze(1)
+
+        # Final projection back to model dim: (B, T, d_model)
+        out = self.W_O(out)
+
+        return out, attn_weights  # return weights for inspection
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+
+    B, T, d_model, d_head = 2, 4, 8, 4
+    x = torch.randn(B, T, d_model)
+
+    # Example padding mask: suppose last token of each sequence is padding.
+    # mask_base: (B, T) with 0 for real tokens, -inf for padding.
+    mask_base = torch.zeros(B, T)
+    mask_base[:, -1] = float("-inf")
+    # Expand to (B, 1, 1, T) so each query token in a sequence
+    # can't attend to padded key positions.
+    attn_mask = mask_base.view(B, 1, 1, T)
+
+    attn = SingleHeadSelfAttention(d_model=d_model, d_head=d_head, causal=False)
+
+    out, weights = attn(x, attn_mask=attn_mask)
+
+    print("x.shape:", x.shape)               # (2, 4, 8)
+    print("out.shape:", out.shape)           # (2, 4, 8)
+    print("weights.shape:", weights.shape)   # (2, 1, 4, 4)
+
+    # Sanity check 1: attention weights sum to 1 over keys (last dim).
+    # sums: (B, 1, T_query)
+    sums = weights.sum(dim=-1)
+    print("weights row sums:", sums)
+
+    # Sanity check 2: compare attention on last (padded) position vs others.
+    # For each batch, query token 0's weights to all keys:
+    # weights[:, :, query_idx, :]
+    print("query 0 weights (batch 0):", weights[0, 0, 0, :])
+    print("query 0 weights (batch 1):", weights[1, 0, 0, :])
+
+    # The last key position (index -1) should have near-zero probability
+    # because we added -inf in the mask for that column.
+    print("weights to padded key (index -1), batch 0:",
+          weights[0, 0, :, -1])
+    print("weights to padded key (index -1), batch 1:",
+          weights[1, 0, :, -1])
 ```
 
-### Multi-Head Self-Attention
+## Multi-Head Self-Attention: Projecting, Splitting, and Recombining
 
-We now wrap this into a multi-head module. Shapes are annotated to make the head reshaping explicit.
+Multi-head self-attention extends single-head attention by letting the model look at the sequence through multiple “views” in parallel. Each head can specialize in different relationships: some may focus on short-range patterns (e.g., local word order), others on long-range dependencies (e.g., subject–verb agreement), or different types of information (syntactic vs. semantic cues). Technically, this is done by having each head operate in its own learned subspace of the model’s feature space.
+
+Assume an input tensor:
+
+- `X` with shape `(batch_size, seq_len, d_model)`
+
+First, we **linearly project** `X` into a higher-dimensional space that packs all heads at once. Instead of making separate projections per head in code, we usually share one set of big projection matrices:
+
+- `W_Q ∈ ℝ^{d_model × (H·d_head)}`
+- `W_K ∈ ℝ^{d_model × (H·d_head)}`
+- `W_V ∈ ℝ^{d_model × (H·d_head)}`
+
+We compute:
+
+- `Q = X W_Q`
+- `K = X W_K`
+- `V = X W_V`
+
+Each of `Q, K, V` has shape `(batch_size, seq_len, H·d_head)`. We then **reshape and split** into heads:
+
+- Reshape to `(batch_size, seq_len, H, d_head)`
+- Often transpose to `(batch_size, H, seq_len, d_head)` for convenience
+
+By design, `d_model = H × d_head`, so concatenating all heads later gives us back `d_model` features per token.
+
+For **parallel computation** of self-attention:
+
+1. For each head `h`:
+   - Take `Q_h, K_h, V_h` with shape `(batch_size, seq_len, d_head)`
+   - Compute scaled dot-product attention:
+
+     \[
+     \text{Attention}(Q_h, K_h, V_h) = \text{softmax}\left(\frac{Q_h K_h^\top}{\sqrt{d_\text{head}}}\right)V_h
+     \]
+
+2. Stack all heads’ outputs:
+   - Each head output: `(batch_size, seq_len, d_head)`
+   - Concatenate along the last dimension to get `(batch_size, seq_len, H·d_head) = (batch_size, seq_len, d_model)`
+
+A minimal sketch in PyTorch-like pseudocode:
 
 ```python
+import torch
+import torch.nn as nn
+import math
+
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, dropout_p: float = 0.0):
+    def __init__(self, d_model, num_heads):
         super().__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert d_model % num_heads == 0
         self.d_model = d_model
-        self.num_heads = num_heads
+        self.h = num_heads
         self.d_head = d_model // num_heads
 
-        # Linear projections for Q, K, V and final output
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
         self.W_o = nn.Linear(d_model, d_model)
 
-        self.attn = ScaledDotProductAttention(dropout_p)
-        self.dropout = nn.Dropout(dropout_p)
-
-    def _split_heads(self, x):
-        """
-        x: (batch, seq, d_model)
-        returns: (batch, num_heads, seq, d_head)
-        """
-        b, seq, _ = x.size()
-        x = x.view(b, seq, self.num_heads, self.d_head)
-        x = x.permute(0, 2, 1, 3)
-        return x
-
-    def _merge_heads(self, x):
-        """
-        x: (batch, num_heads, seq, d_head)
-        returns: (batch, seq, d_model)
-        """
-        b, h, seq, d_h = x.size()
-        x = x.permute(0, 2, 1, 3).contiguous()
-        return x.view(b, seq, h * d_h)
-
     def forward(self, x, mask=None):
-        """
-        x: (batch, seq, d_model)
-        mask: (batch, seq, seq) or (batch, 1, seq, seq)
-        """
-        # Project to Q, K, V
-        Q = self._split_heads(self.W_q(x))  # (b, h, seq, d_head)
-        K = self._split_heads(self.W_k(x))  # (b, h, seq, d_head)
-        V = self._split_heads(self.W_v(x))  # (b, h, seq, d_head)
+        B, T, _ = x.shape
 
+        def split_heads(t):
+            t = t.view(B, T, self.h, self.d_head)
+            return t.transpose(1, 2)  # (B, H, T, d_head)
+
+        Q = split_heads(self.W_q(x))
+        K = split_heads(self.W_k(x))
+        V = split_heads(self.W_v(x))
+
+        scores = Q @ K.transpose(-2, -1) / math.sqrt(self.d_head)  # (B, H, T, T)
         if mask is not None:
-            # Expand mask to (batch, 1, seq, seq) if needed
-            if mask.dim() == 3:
-                mask = mask.unsqueeze(1)
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+        attn = torch.softmax(scores, dim=-1)
 
-        # Merge batch and head dims for dot-product attention
-        b, h, seq, d_h = Q.size()
-        Q_ = Q.reshape(b * h, seq, d_h)
-        K_ = K.reshape(b * h, seq, d_h)
-        V_ = V.reshape(b * h, seq, d_h)
-        mask_ = None
-        if mask is not None:
-            mask_ = mask.expand(b, h, seq, seq).reshape(b * h, seq, seq)
-
-        context, attn = self.attn(Q_, K_, V_, mask_)  # context: (b*h, seq, d_head)
-
-        # Restore heads dimension
-        context = context.view(b, h, seq, d_h)
-        context = self._merge_heads(context)  # (b, seq, d_model)
-
-        out = self.W_o(context)
-        out = self.dropout(out)
-        return out, attn
+        heads = attn @ V  # (B, H, T, d_head)
+        heads = heads.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        out = self.W_o(heads)
+        return out
 ```
 
-### Verifying Shapes with a Tiny Example
+The **final output projection** `W_O ∈ ℝ^{d_model × d_model}` mixes information from all heads and returns to the model dimension. In a full Transformer block:
+
+- You add a **residual connection**: `x + MultiHeadSelfAttention(x)`
+- Then apply **layer normalization**, often as: `LayerNorm(x + MHA(x))`
+
+This preserves gradient flow, stabilizes training, and lets subsequent layers re-weight or reinterpret what each head produced.
+
+Choosing **number of heads `H` and head dimension `d_head`** is a trade-off:
+
+- Larger `H`:
+  - Pros: more subspaces, potentially richer patterns.
+  - Cons: attention score tensor scales as `O(B · H · T²)` in memory and compute; too many heads can be redundant and slower.
+- Larger `d_head` (with fixed `H`):
+  - Pros: more capacity per head.
+  - Cons: more parameters in `W_Q, W_K, W_V, W_O` and higher FLOPs per attention operation.
+
+In practice, `d_model` is usually fixed by the model size, and you choose `H` such that `d_head = d_model / H` is not too small (to keep each head expressive) and `H` is not too large (to keep memory and compute manageable, especially for long sequences).
+
+## Masks in Self-Attention: Padding, Causality, and Custom Patterns
+
+Masking controls *who can see whom* inside self-attention.
+
+- **Padding masks**: hide fake tokens added to make sequences the same length.
+- **Causal masks**: hide *future* tokens to enforce autoregressive behavior.
+
+Consider token indices `[0, 1, 2, 3]`.
+
+- Padding example: real tokens at positions `[0, 1]`, padding at `[2, 3]`.  
+  Padding mask (1 = keep, 0 = mask) for one sequence:
+  - `[1, 1, 0, 0]`  
+  Any attention to positions `2` or `3` should be blocked.
+- Causal example (no future looking): token at `t` can only attend to `≤ t`.  
+  Valid attention pairs:
+  - `0 → 0`
+  - `1 → {0, 1}`
+  - `2 → {0, 1, 2}`  
+  So row 2 cannot attend to column 3 (future).
+
+### Constructing a causal mask matrix
+
+For sequence length `L`, a standard causal mask is a lower-triangular matrix:
+
+For `L = 4`, allowed positions (1 = allowed, 0 = masked):
+
+```text
+[[1, 0, 0, 0],
+ [1, 1, 0, 0],
+ [1, 1, 1, 0],
+ [1, 1, 1, 1]]
+```
+
+In practice we often store a *boolean or 0/−inf* mask and add it to the attention logits.
+
+Minimal PyTorch-style sketch:
 
 ```python
-def demo():
-    torch.manual_seed(0)
+import torch
 
-    batch_size = 2
-    seq_len = 3
-    d_model = 8
-    num_heads = 2
+batch_size = 2
+num_heads = 4
+seq_len = 4
 
-    x = torch.randn(batch_size, seq_len, d_model)
-    mask = torch.ones(batch_size, seq_len, seq_len)  # no masking
+# [L, L] boolean: True = mask (block), False = keep
+causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
 
-    mha = MultiHeadSelfAttention(d_model, num_heads, dropout_p=0.0)
+# Broadcast to [batch, heads, L, L]
+causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)          # [1, 1, L, L]
+causal_mask = causal_mask.expand(batch_size, num_heads, -1, -1)
 
-    print("Input x:", x.shape)
-    out, attn = mha(x, mask)
+# Example attention logits: [batch, heads, L, L]
+attn_logits = torch.randn(batch_size, num_heads, seq_len, seq_len)
 
-    print("Output:", out.shape)          # (2, 3, 8)
-    print("Attention weights:", attn.shape)  # (b*h, seq, seq) = (4, 3, 3)
+# Large negative for masked positions
+NEG_INF = -1e9
+attn_logits = attn_logits.masked_fill(causal_mask, NEG_INF)
 
-demo()
+attn_weights = torch.softmax(attn_logits, dim=-1)            # along "key" axis
 ```
 
-When debugging, you can temporarily add prints inside `_split_heads` and `_merge_heads` to confirm shapes like `(batch, num_heads, seq, d_head)` and `(batch, seq, d_model)`.
+Broadcasting via `unsqueeze` and `expand` lets one base mask work across all batches and heads.
 
-### Common Pitfalls and Edge Cases
+### Why add −∞ *before* softmax?
 
-- **Missing scaling factor**  
-  Forgetting `1 / sqrt(d_k)` in the score computation makes gradients unstable and pushes softmax toward saturation.
+We mask by adding a large negative number (`-1e9` or similar) to disallowed logits *before* softmax. Intuition:
 
-- **Incorrect broadcasting in scores**  
-  Using `Q @ K` without transposing `K` yields shape errors or silently wrong shapes if dimensions happen to align. Always check `scores.shape == (batch, seq_q, seq_k)`.
+- `softmax([…, x, -1e9]) ≈ […, p, 0]`  
+  The masked position’s probability is numerically ~0.
+- The remaining positions are renormalized over only the allowed tokens.
 
-- **Mask misalignment**  
-  - Wrong mask shape can broadcast along the batch or head dimensions incorrectly, masking the wrong tokens.
-  - Using `1` for masked and `0` for unmasked while doing `masked_fill(mask == 0, -inf)` reverses the effect.
+This is preferred over:
 
-- **Very long sequences**  
-  Memory and compute scale as `O(seq_len^2)`. For very long `seq_len`, this becomes a bottleneck; profiling attention separately is useful.
+- **Zeroing after softmax**:  
+  - You break the probability simplex (rows no longer sum to 1).
+  - Gradients back through the softmax don’t reflect the true constrained distribution.
+- **Setting logits to zero**: still gives them non-negligible probability relative to real negatives.
 
-- **Non-divisible head dimensions**  
-  If `d_model % num_heads != 0`, the `view` in `_split_heads` fails. Guard with an assertion.
+Adding a huge negative ensures masked entries are effectively absent from both the forward pass and gradient flow.
 
-### Where Dropout and LayerNorm Plug In
+### Common masking bugs
 
-A typical Transformer-style block around self-attention (simplified):
+Frequent pitfalls:
 
-```python
-class TransformerBlock(nn.Module):
-    def __init__(self, d_model, num_heads, dropout_p=0.1):
-        super().__init__()
-        self.attn = MultiHeadSelfAttention(d_model, num_heads, dropout_p)
-        self.ln1 = nn.LayerNorm(d_model)
-        # feed-forward block omitted; would be here
-        # self.ffn = ...
-        # self.ln2 = nn.LayerNorm(d_model)
+- **Wrong shape**:  
+  - Mask `[batch, L]` mistakenly used where attention is `[batch, heads, L, L]`.  
+  - Broadcasting on the wrong dimensions silently mis-masks.
+- **Wrong axis**:  
+  - Softmax over the wrong dimension (e.g., over queries instead of keys).  
+  - Mask compared against the wrong dimension order (`[L, L]` vs `[L]`).
+- **Wrong dtype**:  
+  - Using `float` mask with values `0/1` but `masked_fill` expects boolean.  
+  - Or using integer mask directly in arithmetic without casting.
+- **Mask applied after softmax**:  
+  - `attn = softmax(logits); attn *= (1 - mask)`  
+  - Probabilities no longer sum to 1; gradients are distorted.
+- **Mixing padding and causal semantics**:  
+  - Using a padding mask as if it were causal leaks future information in language models.
+  - Using only a causal mask when sequences contain padding lets tokens attend to pad positions.
 
-    def forward(self, x, mask=None):
-        # Self-attention + residual + layer norm
-        attn_out, _ = self.attn(x, mask)     # (batch, seq, d_model)
-        x = self.ln1(x + attn_out)           # residual connection
+These bugs often don’t crash; they just degrade model performance or leak information.
 
-        # FFN + residual + ln2 would follow here
-        return x
-```
+### Debugging and sanity checks
 
-- **Dropout** commonly appears:
-  - On attention weights (inside `ScaledDotProductAttention`).
-  - After `W_o` before adding the residual.
-- **LayerNorm** wraps the residual path, stabilizing training by normalizing across features per token.
+Low-friction tactics:
 
-## Handling Position and Structure: Why Self-Attention Needs Extra Signals
+- **Visualize attention for a toy example**:
+  - Use a tiny batch, `L = 4`, `heads = 1`.
+  - Plot `attn_weights[0, 0]` as a heatmap.
+  - For causal masks, verify upper-right triangle is ~zero.
+- **Numerical assertions**:
+  - After softmax, check:
+    ```python
+    masked_probs = attn_weights[causal_mask]
+    assert (masked_probs < 1e-5).all()
+    ```
+  - Check each row sums to ~1:
+    ```python
+    row_sums = attn_weights.sum(dim=-1)
+    assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5)
+    ```
+- **Unit tests with known patterns**:
+  - Construct simple logits:
+    - Identity: large values on diagonal, small elsewhere.
+    - With a mask that allows only self-attention, test that:
+      - Each token’s highest attention is to itself.
+      - Off-diagonal attention is near zero.
+  - For causal tests:
+    - Give future tokens very high logits.
+    - Verify the model *still* does not attend to them.
 
-Consider a vanilla self-attention layer that only sees a bag of token embeddings. If you permute the input sequence (shuffle the tokens) but keep the same set of vectors, the attention output is just permuted in the same way. There is no notion of “first,” “next,” or “previous” inside the mechanism itself—only similarity between vectors. For many sequence tasks this is fatal:  
+Combining small visualizations, row-sum checks, and hand-crafted logits catches nearly all padding/causal masking mistakes before they turn into mysterious training failures.
 
-- In language, “dog bites man” vs. “man bites dog” should not collapse to the same internal representation.  
-- In time series, swapping day 1 and day 10 destroys trends and causality.  
+## Edge Cases and Failure Modes of Self-Attention
 
-Pure self-attention without positional information is permutation-invariant, but most sequence modeling problems are order-sensitive.
+Self-attention is powerful, but it has sharp edges in practice. Understanding where it breaks helps you design more robust models and training setups.
 
-The standard fix is simple but powerful: inject position information into the token representations before attention. Each token embedding `x_t` is combined with a positional signal `p_t`:
+### Very Long Sequences
 
-```python
-x_pos = x_embed + pos_embed  # or concat, depending on design
-attn_out = self_attention(x_pos)
-```
+For a sequence of length `L`, standard self-attention builds an `L × L` attention matrix per head. This has two major consequences:
 
-The attention block itself is unchanged; queries, keys, and values are computed as usual. But because `x_pos` now depends on both token identity and position, permuting the sequence changes the pairwise similarities and therefore the attention pattern. This breaks permutation invariance while retaining the same self-attention machinery.
+- **Quadratic memory and compute**  
+  - Memory: `O(L^2 * H)` for `H` heads (plus activations for backprop).  
+  - Compute: matrix multiplications also scale as `O(L^2 * d)` where `d` is head dimension.  
+  - Practically, doubling the context length can ~quadruple attention cost, making very long contexts (e.g., tens of thousands of tokens) unstable or impossible on a single GPU.
 
-There are two main ways to encode position:
+- **Vanishingly small attention weights**  
+  With long sequences, each query attends over many keys. Even if softmax distributes probability mass non-uniformly, many tokens get extremely small weights (close to numerical underflow), so:
+  - Gradients through those positions become tiny.
+  - The model may effectively “ignore” a large portion of the context, undermining the point of long-range modeling.
 
-- **Absolute positions**: each index `t` (0, 1, 2, …) gets its own embedding or deterministic vector. The model can learn that “position 0” behaves like a start-of-sequence, or that early positions differ from later ones.
-- **Relative positions**: the model cares about “how far apart” tokens are (offsets like -1, +2, +10) rather than their absolute indices. This naturally supports patterns like “attend to the previous token” or “attend within a small window,” and can generalize better across sequence lengths.
+- **Numerical instability in softmax**  
+  Attention logits (`QKᵀ / √d`) can cover a wide range. For large `L` and large `d`:
+  - Some logits can be very positive/negative, causing `exp(logit)` to overflow or underflow in float32.
+  - This can manifest as `NaN` attention matrices, exploding losses, or gradients that suddenly become `inf`.
 
-Self-attention can integrate relative information by modifying how attention scores are computed, e.g., adding learned biases or embeddings that depend on the distance between query and key positions. This lets a head specialize in relations like “previous word,” “same segment,” or “nearby window,” not just global similarity.
+Mitigations include:
+- **Truncation / windowing**: restrict attention to a sliding window around each token.
+- **Chunking**: process sequences in chunks and optionally pass summaries between chunks.
+- **Stable softmax implementations**: always subtract the per-row max before exponentiation.
 
-Positional choices strongly shape what dependencies heads tend to learn:
+### Head Collapse and Degenerate Patterns
 
-- Position-free (or very weak) signals encourage global, order-agnostic patterns—good for sets, bad for syntax or temporal causality.
-- Strong local relative biases push heads to focus on nearby tokens, which often improves efficiency and inductive bias for language or time series.
-- More flexible or long-range encodings make it easier for heads to track dependencies over hundreds or thousands of steps, at the cost of computation and potential overfitting to spurious long-range correlations.
+In theory, multiple heads should learn diverse patterns. In practice, you often see:
 
-Beyond 1D sequences, you can impose **structural biases** by designing positional schemes or masks that reflect the data’s shape:
+- **Uniform attention**: a head assigns nearly equal weights to all tokens. This behaves like an average-pooling layer and carries little structure-specific information.
+- **Highly peaked attention**: a head always locks onto:
+  - The current token (self-attention degenerates to an MLP-like behavior), or
+  - Special tokens (e.g., BOS/CLS), regardless of content.
+- **Redundant heads**: multiple heads learn nearly identical maps, reducing effective model capacity.
 
-- Grids (images): 2D positions, or relative row/column offsets, so attention respects spatial locality.
-- Trees (parses, ASTs): tree-based distances or ancestor relationships as positional/relative features.
-- Graphs: adjacency-based masks and edge-aware positional terms so tokens mainly attend along graph edges.
+Symptoms:
+- Lower utilization of model size: large models behaving like smaller ones.
+- Poor generalization on tasks requiring multiple distinct relationships (e.g., syntax vs. coreference vs. long-range dependencies).
 
-In all these cases, self-attention remains the same algebraic operation. What changes is the positional and structural context you feed into it, which determines whether the model understands “where” and “how” tokens relate, not just “what” they are.
+Mitigations:
+- **Initialization** that avoids extremely large or tiny logits early in training.
+- **Regularization** encouraging head diversity (e.g., penalties on similarity between attention maps, or dropout on entire heads).
+- **Monitoring** head-wise patterns and pruning persistently redundant heads.
 
-## Performance and Scaling: Cost, Memory, and Optimization Concerns
+### Sensitivity to Tokenization and Rare Tokens
 
-Self-attention is powerful but expensive. Understanding its scaling behavior is essential when you push to longer sequences or larger models.
+Self-attention is only as good as the representations it operates on:
 
-### Time and memory complexity
+- **Suboptimal tokenization**:
+  - Over-fragmentation (e.g., rare words split into many subwords) scatters information across multiple tokens.
+  - Self-attention must re-aggregate these pieces; if it fails, meaning is diluted.
+
+- **Rare tokens and OOV-like behavior**:
+  - Embeddings for infrequent tokens are poorly trained.
+  - Their keys/queries may be noisy, leading to:
+    - Low attention weights when they should matter.
+    - Erratic spikes of attention in irrelevant contexts.
+
+Downstream effects:
+- Worse performance on domain-specific terminology, names, or code identifiers.
+- Unstable behavior for sequences dominated by rare or out-of-domain tokens.
+
+Mitigations:
+- **Domain-adapted tokenizers** (e.g., additional merges for frequent domain terms).
+- **More training on domain data** so rare tokens become less rare.
+- **Embedding regularization** and tying (e.g., sharing input/output embeddings) to stabilize representations.
+
+### Positional and Counting Failures
+
+Self-attention is permutation-invariant without positional information. Even with positional encodings, certain tasks are tricky:
+
+- **Off-by-one and order-related errors**:
+  - Counting tasks (“the 5th item in a list”), matching parentheses, or strict sequence labeling can fail if:
+    - Positional encodings are weak or not expressive enough.
+    - The network is too shallow to compose position-dependent patterns.
+
+- **Pattern confusion**:
+  Models may:
+  - Mix up repeated structures (e.g., confusing the first `if` with the second).
+  - Mis-handle long-distance order constraints where many similar tokens appear.
+
+Mitigations:
+- **Rich positional encodings** (sinusoidal, learned, relative position bias).
+- **Sufficient depth** to build hierarchical patterns.
+- **Architectural bias** for ordering (e.g., relative attention, local windows, or combining with convolutions/RNNs for specific tasks).
+
+### Mitigation Tactics in Practice
+
+A few practical levers you can pull:
+
+- **Truncation and chunking**
+  - Hard truncate inputs to a maximum length.
+  - Use chunk-level processing with overlap to preserve local context.
+
+- **Sparse or approximate attention**
+  - Restrict attention to:
+    - Local windows (banded attention).
+    - Top-k keys per query.
+    - Predefined patterns (block sparse, strided).
+  - Use approximate algorithms (e.g., kernel approximations, clustering) to reduce `O(L^2)` to something closer to linear.
+
+- **Initialization and regularization**
+  - Initialize `Q`, `K`, `V` weights so that early logits are in a moderate range (e.g., scaled Xavier/He).
+  - Apply:
+    - Dropout on attention weights.
+    - Head dropout.
+    - Weight decay or norm constraints to stabilize training.
+
+- **Monitoring attention diversity**
+
+  Simple metric sketch (pseudocode) to track head collapse during training:
+
+  ```python
+  import torch
+
+  def attention_diversity(attn):  # attn: [batch, heads, seq, seq]
+      # Compute average attention map per head
+      # Then measure pairwise cosine similarity between heads
+      B, H, S, _ = attn.shape
+      attn_mean = attn.mean(dim=0)        # [H, S, S]
+      flat = attn_mean.reshape(H, -1)     # [H, S*S]
+      norm = flat / (flat.norm(dim=1, keepdim=True) + 1e-8)
+      sim = norm @ norm.t()              # [H, H]
+      # We want off-diagonal similarity to be not too close to 1
+      off_diag = sim[~torch.eye(H, dtype=bool)]
+      return off_diag.mean().item()
+  ```
+
+  You can log this metric and watch for:
+  - Values approaching 1.0 → heads very similar (collapse).
+  - Reasonable mid-range values → diverse head behavior.
+
+Combining these tactics yields models that handle longer sequences more gracefully, avoid degeneracy in attention patterns, and remain robust to real-world token distributions and ordering constraints.
+
+## Performance and Memory Considerations for Self-Attention
+
+Self-attention is powerful but expensive. Understanding where the cost comes from helps you size models and hardware realistically and avoid nasty surprises in production.
+
+### Computational complexity
 
 Consider a single self-attention layer with:
 
@@ -569,336 +763,230 @@ Consider a single self-attention layer with:
 - Sequence length: `L`
 - Model dimension: `d_model`
 - Number of heads: `H`
-- Per-head dimension: `d_k = d_model / H`
+- Per-head dimension: `d_head = d_model / H`
 
-Key costs:
+For one head, you project inputs `X ∈ ℝ^{B×L×d_model}` to:
 
-1. **Projection to Q, K, V**
+- `Q, K, V ∈ ℝ^{B×L×d_head}`
 
-   You multiply the input `X ∈ ℝ^{B×L×d_model}` by three linear layers:
+The heavy step is the score matrix:
 
-   - Time: `O(B * L * d_model^2)` if implemented as three separate `d_model×d_model` projections.
-   - Memory (activations): `O(B * L * d_model)` for `Q`, `K`, `V`.
+- `S = Q Kᵀ`, where per batch, `Q ∈ ℝ^{L×d_head}`, `Kᵀ ∈ ℝ^{d_head×L}`  
+- Multiplication cost per head, per batch: `O(L² · d_head)`
+- Across `H` heads and `B` batches: `O(B · H · L² · d_head)`
 
-2. **Attention scores and softmax**
+This quickly dominates:
 
-   Per head, scores are `S = QKᵀ`, shape `B × H × L × L`.
+- Doubling sequence length `L` roughly *quadruples* attention FLOPs.
+- Doubling number of heads `H` doubles cost (for fixed `d_head`).
+- Increasing `d_model` typically increases `H` or `d_head`, increasing cost linearly in `d_head`.
 
-   - Time: `O(B * H * L^2 * d_k)` (multiplying `L×d_k` by `d_k×L`).
-   - Memory: `O(B * H * L^2)` for scores (plus some for softmax).
+### Memory: where it actually goes
 
-3. **Weighted sum**
+During training, major consumers (per layer) are:
 
-   `A = softmax(S) V` also costs:
+- **Input / hidden states**: `X ∈ ℝ^{B×L×d_model}`  
+  - Scales linearly with `B` and `L`.
+- **Q, K, V activations**: `B×L×H×d_head` each  
+  - Total ~ `3 · B · L · H · d_head`
+- **Attention weights**: `A ∈ ℝ^{B×H×L×L}`  
+  - Quadratic in `L`: `B · H · L²`  
+  - This is usually the main memory bottleneck for long sequences.
+- **Gradients**: roughly another copy of activations, especially for Q/K/V and attention weights.
 
-   - Time: `O(B * H * L^2 * d_k)`.
-   - Memory: `O(B * L * d_model)` for the output.
+Key scaling:
 
-Overall, ignoring constant factors, **self-attention time is dominated by `O(B * L^2 * d_model)`**, and the **quadratic `L^2` term** is the main scaling problem. Activation memory is dominated by the attention scores at `O(B * H * L^2)`.
+- Doubling `L` → ~4× memory for attention weights.
+- Increasing `H` → linear growth in both compute and memory for weights and Q/K/V.
+- Larger `d_model` → linear growth in hidden states and Q/K/V.
 
-### Attention scores dominate memory
+### Practical knobs to reduce cost
 
-The `L×L` score matrix per head is the key memory hog:
+Typical levers, from least to most painful:
 
-- Memory roughly scales as `B * H * L^2 * bytes_per_element`.
-- Doubling `L` (sequence length) roughly **quadruples** score-memory usage.
-- For long sequences, this can exceed device memory even when the parameter count fits comfortably.
+- **Mixed-precision (FP16/BF16)**  
+  - Halves memory for activations; often increases throughput.
+  - Ensure numerically stable implementations (e.g., scaled dot-product attention with safe softmax).
 
-This is why “maximum context length” is often a memory, not just a modeling, constraint. Mixed precision and activation checkpointing can help, but the `L^2` scaling remains.
+- **Gradient checkpointing**  
+  - Recompute activations during backward instead of storing them all.
+  - Trade extra compute for reduced peak memory (often 30–50% savings).
+  - Frameworks usually offer this layer-wise.
 
-### Practical knobs to stay within budgets
+- **Reduce sequence length `L`**  
+  - The single most impactful knob because cost is O(L²).
+  - Truncate, window, or chunk inputs when full context isn’t needed.
+  - For classification, consider using only prefix tokens or pooled representations.
 
-To fit your hardware and latency targets, you can:
+- **Reduce head count `H` or `d_model` / `d_head`**  
+  - Fewer / smaller heads shrink Q/K/V and attention weights.
+  - May hurt modeling capacity; consider pruning or distillation to find redundancies.
 
-- **Reduce sequence length `L`**
-  - Truncate or window inputs.
-  - Pros: Quadratically reduces attention cost and memory.
-  - Cons: May lose long-range dependencies; needs careful task-specific handling.
+- **Reduce batch size `B`**  
+  - Linear reduction in memory and compute per step.
+  - Compensate via gradient accumulation if you need a large effective batch size.
 
-- **Reduce model width `d_model` or `H`**
-  - Pros: Linear reduction in compute and some memory; often easiest way to fit a GPU.
-  - Cons: Less capacity per token; can degrade quality.
-
-- **Reduce batch size `B`**
-  - Pros: Linear memory reduction; often the first lever for OOM.
-  - Cons: Noisy gradients, slower wall-clock throughput unless you adjust learning rate or accumulate gradients.
-
-- **Fewer layers**
-  - Pros: Linear reduction in compute and activations.
-  - Cons: Lower representational depth; often hurts performance more sharply than modest width/batch changes.
-
-Typical trade-off: For a fixed device, you choose among longer context, larger model, or larger batch—but not all three.
-
-### Ideas behind more efficient attention variants
-
-Many “efficient attention” proposals tackle the `L^2` issue:
-
-- **Sparse patterns**
-  - Limit each position to attend only to a subset (e.g., local windows, strided or block patterns).
-  - Aim: Reduce effective complexity to near-linear or `O(L log L)` while preserving enough global context via carefully designed sparsity.
-
-- **Low-rank / kernel-based approximations**
-  - Approximate the `L×L` attention matrix using lower-rank structure or kernel tricks so you can rewrite attention as products that scale as `O(L * d_model)` or `O(L * r)` for small rank `r`.
-  - Core idea: You never form the full `L×L` matrix explicitly.
-
-- **Chunking / block processing**
-  - Process sequences in chunks, computing attention only within or between limited chunks.
-  - Often combined with caching or recurrent-style mechanisms to approximate full-context attention over time.
-
-All of these trade exactness for better scaling. The details differ, but the shared theme is: avoid storing or computing the full dense `L×L` scores.
-
-### Implementation pitfalls and profiling
-
-Even with the same theoretical complexity, implementations can vary significantly in speed:
-
-- **Excessive tensor reshaping or transposing**
-  - Repeated, unnecessary `view`, `permute`, or `contiguous` calls can cause data copies and break fusion opportunities in kernels.
-
-- **Non-contiguous memory layouts**
-  - Operations on non-contiguous tensors can trigger implicit copies or slow memory access.
-
-- **Small, fragmented ops**
-  - Implementing attention as many tiny operations (e.g., manual loops over heads or sequence positions) prevents kernel fusion and underutilizes hardware.
-
-A minimal, reasonably efficient sketch in a typical tensor framework looks like:
-
-```python
-def scaled_dot_product_attention(q, k, v, mask=None):
-    # q, k, v: (B, H, L, d_k)
-    d_k = q.size(-1)
-    scores = (q @ k.transpose(-2, -1)) / d_k**0.5  # (B, H, L, L)
-
-    if mask is not None:
-        scores = scores.masked_fill(mask == 0, float('-inf'))
-
-    attn = scores.softmax(dim=-1)  # (B, H, L, L)
-    out = attn @ v                # (B, H, L, d_k)
-    return out
-```
-
-For real systems:
-
-- Use fused, library-provided attention kernels when possible.
-- Profile end-to-end with built-in profilers to identify:
-  - Time spent in attention vs. feed-forward layers.
-  - Memory-bound vs. compute-bound regions.
-  - Hotspots caused by reshaping, casting, or Python-side loops.
-
-Grounding your design in these complexity and implementation facts helps you choose architectures and configurations that scale without surprise OOMs or latency spikes.
-
-## Edge Cases, Failure Modes, and Debugging Self-Attention
-
-Self-attention layers are deceptively simple mathematically, but they fail in characteristic ways. Recognizing the patterns early saves a lot of training time and head‑scratching.
-
-### Numerical stability: exploding scores and near one-hot softmax
-
-The raw attention scores are dot products between queries and keys. Without care, these scores can grow large in magnitude, causing the softmax to:
-
-- Saturate (e.g., one value ≈ 1, all others ≈ 0)
-- Produce `NaN` due to overflow in `exp`
-
-Mitigations that should be standard:
-
-- **Scaling**: divide scores by `sqrt(d_k)` before softmax. This keeps logits in a reasonable range as dimensionality grows.
-- **Normalization**:
-  - Layer normalization before/after attention blocks stabilizes activations.
-  - Gradient clipping prevents rare but catastrophic updates.
-- **Initialization**:
-  - Use variance-preserving initializers so `Q`, `K`, `V` magnitudes don’t explode.
-  - Avoid large bias terms in projection layers that could shift scores.
-
-A basic numerical check: log the mean and max of attention logits before softmax. If max values are consistently large (e.g., > 30) or grow over training, you’re heading toward saturation.
-
-### Attention collapse: always focusing on a few tokens
-
-A common failure is **attention collapse**, where heads put almost all mass on:
-
-- A single position (e.g., the first token)
-- A special token (e.g., CLS, BOS)
-- The token itself (identity mapping)
-
-Symptoms:
-
-- Attention heatmaps show vertical stripes (every token attends to the same index).
-- Head entropy (per row of the attention matrix) is very low across the board.
-
-Detection strategies:
-
-- Visualize attention for a few representative sequences.
-- Compute attention entropy:
-  - High entropy → diffuse attention
-  - Very low entropy across many heads/layers → collapse
-
-Countermeasures:
-
-- Add or tune regularization (dropout in attention, weight decay).
-- Encourage diversity across heads (e.g., loss terms or architectural changes, if you control the model).
-- Inspect data preprocessing; sometimes a special token dominates because it encodes too much information.
-
-### Padding and masking bugs
-
-Masks ensure the model ignores padded positions and (for causal models) the future. When masks are wrong, self-attention misbehaves in subtle ways.
-
-Typical manifestations:
-
-- The model **attends heavily to pad tokens**:
-  - Outputs depend on how many pads are present.
-  - Performance degrades with variable-length batches but looks fine for fixed-length data.
-- Sequence-to-sequence models “leak” by attending to future or padded positions in the encoder/decoder.
-
-Debugging steps:
-
-- Manually construct **tiny synthetic inputs**:
-  - Batch of size 1–2, sequence length 3–5.
-  - Clear, distinct token embeddings (e.g., one-hot or small integers).
-  - Explicit masks (e.g., last two positions padded).
-- Print:
-  - The mask tensor (confirm `True`/`1` means “keep” or “mask out” as expected).
-  - The attention matrix for each head.
-- Ensure masked positions:
-  - Receive near-zero attention probability.
-  - Do not affect the attended summary (test by toggling pad tokens and checking output invariance).
-
-Shape mismatches also cause silent errors: a mask broadcast in the wrong dimension can effectively mask the wrong tokens or even whole heads.
-
-### Overfitting patterns specific to attention
-
-Attention heads can overfit in ways that look “working” but don’t generalize:
-
-- **Identity heads**: each position attends almost exclusively to itself.
-- **Position-only heads**: attention patterns depend only on positions (e.g., always attend to previous token) and ignore content.
-- **Shortcut heads**: a head always attends to a special token that carries global info, ignoring local structure.
-
-Hints you’re seeing this:
-
-- Validation loss diverges from training loss, while attention patterns remain rigid.
-- Attention maps look nearly identical across very different inputs.
-
-Mitigations:
-
-- Regularization:
-  - Attention dropout.
-  - Weight decay on projection matrices.
-- Architectural hygiene:
-  - Limit the number of heads to what’s justified by data.
-  - Periodically evaluate **head importance** (e.g., by zeroing heads and measuring impact) and prune unhelpful ones.
-
-### Practical observability and tests
-
-Treat self-attention as a first-class observable component:
-
-- **Log attention entropy**:
-  - Per head, per layer.
-  - Watch for:
-    - Entropy collapsing to near zero (over-confident, one-hot behavior).
-    - Entropy blowing up if logits are noisy/undertrained.
-- **Visualize heads**:
-  - For a fixed set of diagnostic prompts/inputs, render attention matrices:
-    - Rows: query positions.
-    - Columns: key positions.
-  - Look for systematic patterns (diagonals, local bands, global tokens) and anomalies (attention to pads, random noise).
-- **Unit tests**:
-  - **Shape tests**: ensure `Q`, `K`, `V`, masks, and outputs have expected shapes and broadcasting semantics.
-  - **Mask behavior tests**:
-    - Changing padded tokens should not change outputs.
-    - For causal masks, attending to future positions should be impossible.
-
-A small test harness can already catch a lot:
+A minimal sketch of how some of this appears in code:
 
 ```python
 import torch
 import torch.nn.functional as F
 
-def run_attention(q, k, v, mask=None):
-    scores = q @ k.transpose(-2, -1) / q.size(-1) ** 0.5
-    if mask is not None:
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+def self_attn(x, W_q, W_k, W_v, W_o, n_heads):
+    B, L, d_model = x.shape
+    d_head = d_model // n_heads
+
+    q = x @ W_q      # (B, L, d_model)
+    k = x @ W_k
+    v = x @ W_v
+
+    # reshape to (B, n_heads, L, d_head)
+    def split_heads(t):
+        return t.view(B, L, n_heads, d_head).transpose(1, 2)
+
+    q, k, v = map(split_heads, (q, k, v))
+
+    # attention scores: (B, n_heads, L, L)
+    scores = q @ k.transpose(-2, -1) / (d_head ** 0.5)
     attn = F.softmax(scores, dim=-1)
-    return attn @ v, attn
+    out = attn @ v  # (B, n_heads, L, d_head)
 
-# Example: verify padded token does not influence output
-torch.manual_seed(0)
-seq_len, d = 4, 8
-x = torch.randn(1, seq_len, d)
-pad_mask = torch.tensor([[1, 1, 1, 0]])  # last token is pad
-
-Wq = torch.randn(d, d)
-Wk = torch.randn(d, d)
-Wv = torch.randn(d, d)
-
-def project(x):
-    return x @ Wq, x @ Wk, x @ Wv
-
-q, k, v = project(x)
-mask = pad_mask.unsqueeze(1).expand(-1, seq_len, -1)  # [B, T, T]
-
-y1, attn1 = run_attention(q, k, v, mask)
-
-# Change padded token embedding
-x2 = x.clone()
-x2[0, -1] += 10.0  # large change in pad
-q2, k2, v2 = project(x2)
-y2, attn2 = run_attention(q2, k2, v2, mask)
-
-print("Max diff in non-pad outputs:", (y1[0, :-1] - y2[0, :-1]).abs().max().item())
+    out = out.transpose(1, 2).contiguous().view(B, L, d_model)
+    return out @ W_o  # (B, L, d_model)
 ```
 
-This kind of minimal test can quickly reveal mask mistakes, attention collapse, and numerical issues long before you scale to full training.
+Even in this tiny example, you can see where `B`, `L`, `n_heads`, and `d_head` appear in the tensor shapes and thus govern cost.
 
-## Putting It All Together: Self-Attention in a Transformer Block
+### Inference-time trade-offs
 
-A standard Transformer block wraps self-attention inside a few other key components:
+At inference, no gradients are stored, but attention is still O(L²):
 
-- **Multi-head self-attention sublayer**
-- **Residual (skip) connections**
-- **Layer normalization**
-- **Position-wise feed-forward network (FFN)** applied independently to each token
-- Often **dropout** around/inside these sublayers
+- **Batching short sequences**  
+  - Many short sequences in one batch maximize GPU utilization and throughput.
+  - Good for online services with variable-length requests; pad to a reasonable max length but avoid huge outliers.
 
-A common ordering (pre-norm variant) looks like:
+- **Few long sequences**  
+  - Long `L` increases latency and can blow memory because of `L²` attention weights.
+  - Consider chunked decoding or specialized long-context variants if long inputs are common.
 
-1. `x` (sequence of token embeddings with positional encodings added)
-2. `x₁ = x + SelfAttention(LayerNorm(x))`
-3. `x₂ = x₁ + FeedForward(LayerNorm(x₁))`
+- **Caching K/V in causal models**  
+  - Autoregressive decoding can reuse past `K` and `V`:
+    - At step `t`, compute attention against all past tokens with cached K/V.
+    - Per-step cost becomes O(t · d_head · H) instead of recomputing from scratch.
+  - Memory holds cached K/V per layer: `O(L · H · d_head)` instead of `L²`.
+  - Trade-off:
+    - Better throughput for long generations.
+    - Higher per-request memory footprint, especially with many concurrent requests.
 
-So the dataflow through a single block is:
+- **Latency vs. throughput**  
+  - Larger batches → higher throughput, but higher per-request latency.
+  - For real-time applications, cap batch size or use dynamic batching with tight timeouts.
 
-1. **Input embeddings**: You start with a matrix `X ∈ ℝ^{T×d_model}` where each row is a token embedding plus positional information.
-2. **Self-attention**:
-   - Compute queries, keys, values from `X`.
-   - Apply attention (with any required masks).
-   - Concatenate heads and project back to `d_model`, giving `SA(X)`.
-3. **Residual + norm**:
-   - Add `X` back: `Y = X + SA(X)` to stabilize gradients and preserve the original signal.
-   - Normalize `Y` across the feature dimension for each token.
-4. **Feed-forward network**:
-   - Apply a 2-layer MLP to each token independently: `FFN(norm(Y))`.
-   - Add another residual and normalization: `Z = Y + FFN(norm(Y))`.
+### Observability and detecting pathologies
 
-Stacking many such blocks lets the model progressively build more abstract interactions:
+You won’t manage what you don’t measure:
 
-- Lower layers capture local and syntactic relationships.
-- Higher layers aggregate longer-range and task-specific patterns.
-- Because each layer attends over the entire (visible) sequence, depth compounds these relationships instead of just widening a fixed receptive field.
+- **Instrument GPU memory usage**
+  - Log peak and per-layer memory for typical and worst-case inputs.
+  - Track OOM events with associated `L`, `B`, and model config.
 
-Self-attention’s role changes with architecture type:
+- **Track per-layer FLOPs / runtime**
+  - Use profiling tools to measure:
+    - Time spent in attention vs. MLP.
+    - Which layers dominate runtime (often early or middle layers with largest `L`).
+  - Helps prioritize optimizations (e.g., apply more aggressive tricks to bottleneck layers).
 
-- **Encoder-only** (e.g., for classification):
-  - Self-attention is **bidirectional**: each token can attend to all others.
-  - No causal mask; masks are usually just for padding.
-- **Decoder-only** (e.g., autoregressive generation):
-  - Self-attention is **causal**: tokens can only attend to past and current positions.
-  - A triangular mask enforces left-to-right generation.
-- **Encoder–decoder**:
-  - **Encoder blocks**: bidirectional self-attention (like encoder-only).
-  - **Decoder blocks**: 
-    - Causal self-attention over decoded tokens.
-    - Plus a **cross-attention** sublayer where decoder queries attend to encoder outputs (keys/values).
+- **Log sequence-length distribution**
+  - Record histograms of `L` in both training and production.
+  - Watch for:
+    - Rare but extremely long inputs causing spikes in latency/memory.
+    - Drift over time (e.g., users pasting full documents instead of short prompts).
+  - Implement guards:
+    - Hard caps on `L`.
+    - Automatic truncation or rejection of pathological requests.
 
-To summarize, you should now be able to:
+Closing the loop between theory (O(B · H · L² · d_head)) and observability data lets you choose model sizes and deployment settings that are sustainable rather than just barely working.
 
-- Write down the components of a Transformer block and their order.
-- Trace how embeddings and positional information flow through self-attention, residuals, norm, and FFN.
-- Reason about what stacking more blocks buys you in terms of interaction depth.
-- Distinguish encoder, decoder, and encoder–decoder attention patterns (especially masking).
-- Use this mental model to interpret architecture diagrams, decode notation in papers, and map configuration options to actual behavior when implementing or modifying Transformer models.
+## Interpreting and Using Attention Weights Safely
+
+Inspecting attention starts with getting the weights out of your model. In most Transformer implementations you can enable an option like `output_attentions=True` and receive a tensor shaped roughly like:
+
+`attn: (num_layers, batch_size, num_heads, seq_len, seq_len)`
+
+Each `attn[l, b, h]` is a token–token matrix: how much head `h` in layer `l` attends from each query token (rows) to each key token (columns).
+
+On a short example sequence:
+
+```python
+import torch
+
+def inspect_attention(model, tokenizer, text):
+    encoded = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**encoded, output_attentions=True)
+
+    # attentions: list[length = num_layers] of (batch, num_heads, seq, seq)
+    attentions = torch.stack(outputs.attentions)  # (L, B, H, S, S)
+    L, B, H, S, _ = attentions.shape
+
+    # Aggregate across heads (simple average)
+    avg_over_heads = attentions.mean(dim=2)       # (L, B, S, S)
+
+    # Aggregate across layers (simple average)
+    avg_over_layers = avg_over_heads.mean(dim=0)  # (B, S, S)
+
+    # Get single example
+    attn_matrix = avg_over_layers[0]              # (S, S)
+    tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"][0])
+
+    return attn_matrix, tokens
+```
+
+You can now visualize `attn_matrix` as a heatmap over a token–token grid:
+
+- Rows: query tokens (where information is read from).
+- Columns: key tokens (where information is attended to).
+- Cell color: attention weight.
+
+Common visualization approaches:
+
+- **Global averaged heatmap:**  
+  Average over heads and/or layers, then show a single `seq_len × seq_len` heatmap. This gives a coarse sense of “which tokens talk to which.”
+- **Head-specific views:**  
+  Plot one heatmap per head (possibly only for one layer). This reveals specialized heads (e.g., punctuation, long-distance dependencies).
+- **Head selection/aggregation:**
+  - Rank heads by some metric (e.g., average attention to certain token types) and inspect the top few.
+  - Cluster heads based on their attention patterns, then visualize one representative per cluster.
+  - For debugging, compare the same head across different inputs to see if it behaves consistently.
+
+When interpreting these patterns, several caveats are critical:
+
+- Attention weights are **not guaranteed causal importance**. High attention from token A to B does *not* mean B is the main reason for the model’s prediction.
+- Scaling (e.g., `1/sqrt(d_k)` in dot-product attention), softmax temperature, and normalization within each row can make weights look sharper or flatter without changing true influence.
+- Gradient-based attributions (e.g., input gradients, integrated gradients) often **disagree** with attention maps. That disagreement is a hint that attention is at best a partial view.
+- Multi-head attention can use some heads mostly for routing, position, or other internal signals that are not semantically meaningful to humans.
+
+Because of these limitations, using raw attention scores directly in business logic is risky. Examples of brittle patterns:
+
+- Treating any attention weight above a threshold as “ground truth” explanation.
+- Implementing rules like “if token X gets the highest attention, then classify as Y.”
+- Using attention maps as the sole signal for compliance, safety, or critical decisions.
+
+Safer patterns include:
+
+- Using attention as a **soft hint** for UX (e.g., highlighting tokens that might be relevant) while still relying on the model’s overall output probabilities.
+- Employing attention maps for **exploratory analysis** and debugging, not as formal explanations.
+- Combining attention with other signals (gradients, perturbation tests, counterfactual inputs) when you want stronger interpretability.
+
+To improve your confidence, build small unit-test-style probes:
+
+- Construct synthetic inputs with **known relational structure**:
+  - Simple coreference: “Alice gave Bob a book. She smiled.”  
+    Check if some heads in later layers strongly connect “She” to “Alice.”
+  - Simple arithmetic or matching: “A: 7, B: 3, answer: A.”  
+    Check if the token “answer” attends to “A.”
+- Verify that **at least some heads** reflect these relationships in a plausible way, while accepting that:
+  - Many heads will be opaque or mixed.
+  - Different layers might specialize differently (lower layers: local patterns; higher: semantic relations).
+
+Treat attention weights as one debugging and interpretability lens among several, not as a faithful map of “what the model is really thinking.”
