@@ -574,7 +574,7 @@ def run(topic: str, as_of: Optional[str] = None):
     return out
 
 final_result = run("Self Attention in Transformer Architecture")
-print(f"result: {final_result}")
+# print(f"result: {final_result}")
 
 # get your graph image
 png_data = app.get_graph().draw_mermaid_png()
