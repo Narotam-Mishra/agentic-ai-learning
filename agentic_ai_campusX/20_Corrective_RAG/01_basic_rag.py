@@ -13,8 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
-from IPython.display import Image, display
-from pathlib import Path
+
 
 load_dotenv(override=True)
 
@@ -79,12 +78,15 @@ g.add_edge("generate", END)
 
 app = g.compile()
 
-# get your graph image
-png_data = app.get_graph().draw_mermaid_png()
-display(Image(png_data))
+# 5) Run
+res = app.invoke({"question": "What is Transformer in Deep Learning?.", "docs": [], "answer": ""})
+print(f"res: {res["answer"]}")
 
-images_dir = Path(__file__).parent / "images"
-images_dir.mkdir(exist_ok=True)
-
-with open(images_dir / "basic_rag_workflow.png", "wb") as f:
-    f.write(png_data)
+# check retrieved documents
+print(res['docs'][0].page_content)
+print('*'*100)
+print(res['docs'][1].page_content)
+print('*'*100)
+print(res['docs'][2].page_content)
+print('*'*100)
+print(res['docs'][3].page_content)
