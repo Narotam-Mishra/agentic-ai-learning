@@ -1,0 +1,90 @@
+
+# basic RAG chatbot app
+
+from typing import List, TypedDict
+import time
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+
+from langgraph.graph import StateGraph, START, END
+from dotenv import load_dotenv
+from IPython.display import Image, display
+from pathlib import Path
+
+load_dotenv(override=True)
+
+# step 1 - document ingestion
+docs = (
+    PyPDFLoader("./docs/book1.pdf").load() +
+    PyPDFLoader("./docs/book2.pdf").load() +
+    PyPDFLoader("./docs/book3.pdf").load()
+)
+
+# print(f"docs length: {len(docs)}")
+
+# step 2 - chunking
+chunks = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=150).split_documents(docs)
+
+# step 2.1 - clean text to avoid UnicodeEncodeError (surrogates from PDF extraction)
+for d in chunks:
+    d.page_content = d.page_content.encode("utf-8", "ignore").decode("utf-8", "ignore")
+
+# print(f"final_size: {len(chunks)}")
+
+# step 3 - index (fresh collection each run)
+embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
+vector_store = FAISS.from_documents(chunks, embeddings)
+
+retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k':4})
+
+# LLM + prompt
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+class State(TypedDict):
+    question: str
+    docs: List[Document]
+    answer: str
+
+def retrieve(state):
+    q = state["question"]
+    return{
+        "docs": retriever.invoke(q)
+    }
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "Answer only from the context. If not in context, say you don't know."),
+        ("human", "Question: {question}\n\nContext:\n{context}"),
+    ]
+)
+
+def generate(state):
+    context = "\n\n".join(d.page_content for d in state["docs"])
+    out = (prompt | llm).invoke({"question": state["question"], "context": context})
+    return{
+        "answer": out.content
+    }
+
+g = StateGraph(State)
+g.add_node("retrieve", retrieve)
+g.add_node("generate", generate)
+g.add_edge(START, "retrieve")
+g.add_edge("retrieve", "generate")
+g.add_edge("generate", END)
+
+app = g.compile()
+
+# get your graph image
+png_data = app.get_graph().draw_mermaid_png()
+display(Image(png_data))
+
+images_dir = Path(__file__).parent / "images"
+images_dir.mkdir(exist_ok=True)
+
+with open(images_dir / "basic_rag_workflow.png", "wb") as f:
+    f.write(png_data)
