@@ -1,5 +1,5 @@
 
-# RAG with retrieval refinement
+# CRAG with retrieval refinement
 
 from typing import List, TypedDict
 import re
