@@ -1,5 +1,5 @@
 
-# CRAG using web search with query rewrite (build external knowledge)
+# CRAG using with ambiguous knowledge handling
 
 from typing import List, TypedDict, Literal
 from pydantic import BaseModel
@@ -15,7 +15,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
 from langchain_tavily import TavilySearch
-
 
 load_dotenv(override=True)
 
@@ -54,11 +53,11 @@ class State(TypedDict):
     kept_strips: List[str]
     refined_context: str
 
-    # web_docs for web search results
-    web_docs: List[Document]
-
     # to store revised query
     web_query: str
+
+    # web_docs for web search results
+    web_docs: List[Document]
 
     answer: str
 
@@ -139,7 +138,7 @@ def eval_each_doc_node(state: State) -> State:
     return {
         "good_docs": good,
         "verdict": "AMBIGUOUS",
-        "reason": f"No chunk scored > {UPPER_TH}, but not all were < {LOWER_TH}. {why}",
+        "reason": f"No chunk scored > {UPPER_TH}, but not all were > {LOWER_TH}. {why}",
     }
 
 # filter (LLM judge)
@@ -160,14 +159,25 @@ filter_prompt = ChatPromptTemplate.from_messages(
 
 filter_chain = filter_prompt | llm.with_structured_output(KeepOrDrop)
 
+# -----------------------------
+# Knowledge refinement
+# (CORRECT => internal only)
+# (INCORRECT => web only)
+# (AMBIGUOUS => internal + web)
+
 # Refining (Decompose -> Filter -> Recompose)
+# -----------------------------
 def refine(state: State) -> State:
     q = state["question"]
 
     if state.get("verdict") == "CORRECT":
-        context = "\n\n".join(d.page_content for d in state["good_docs"]).strip()
-    else:
-        context = "\n\n".join(d.page_content for d in state["web_docs"]).strip()
+        docs_to_use = state["good_docs"]
+    elif state.get("verdict") == "INCORRECT":
+        docs_to_use = state["web_docs"]
+    else:    
+        docs_to_use = state["good_docs"] + state["web_docs"]
+
+    context = "\n\n".join(d.page_content for d in docs_to_use).strip()
 
     strips = decompose_to_sentences(context)
 
@@ -230,7 +240,7 @@ def web_search_node(state: State) -> State:
     else:
         results = []
 
-    web_docs = []
+    web_docs: List[Document] = []
     for r in results or []:
         # Ignore malformed entries instead of crashing the LangGraph node.
         if not isinstance(r, dict):
@@ -250,6 +260,7 @@ def web_search_node(state: State) -> State:
         "web_docs": web_docs
     }
 
+# generate
 answer_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -267,29 +278,28 @@ def generate(state: State) -> State:
         "answer": out.content
     }
 
-def ambiguous_node(state: State) -> State:
-    return {"answer": f"Ambiguous: {state['reason']}"}
-
-def route_after_eval(state: State) -> str:
+# -----------------------------
+# Routing
+# CORRECT => refine
+# INCORRECT / AMBIGUOUS => rewrite -> web_search -> refine -> generate
+# -----------------------------
+def route_after_eval(state: State) -> Literal["refine", "rewrite_query"]:
     if state["verdict"] == "CORRECT":
         return "refine"
-    elif state["verdict"] == "INCORRECT":
-        return "rewrite_query"
     else:
-        return "ambiguous"
+        return "rewrite_query"
 
-# build graph
+# build your graph
 g = StateGraph(State)
 
 g.add_node("retrieve", retrieve_node)
 g.add_node("eval_each_doc", eval_each_doc_node)
 
-g.add_node("rewrite_query", rewrite_query_node)  # ✅ NEW
+g.add_node("rewrite_query", rewrite_query_node)
 g.add_node("web_search", web_search_node)
 
 g.add_node("refine", refine)
 g.add_node("generate", generate)
-g.add_node("ambiguous", ambiguous_node)
 
 g.add_edge(START, "retrieve")
 g.add_edge("retrieve", "eval_each_doc")
@@ -299,24 +309,26 @@ g.add_conditional_edges(
     route_after_eval,
     {
         "refine": "refine",
-        "rewrite_query": "rewrite_query",  # ✅ NEW branch
-        "ambiguous": "ambiguous",
+        "rewrite_query": "rewrite_query",
     },
 )
 
-# INCORRECT path: rewrite -> web_search -> refine -> generate
+# non-correct path
 g.add_edge("rewrite_query", "web_search")
 g.add_edge("web_search", "refine")
-g.add_edge("refine", "generate")
 
+# correct path already goes to refine
+g.add_edge("refine", "generate")
 g.add_edge("generate", END)
-g.add_edge("ambiguous", END)
 
 app = g.compile()
 
+# -----------------------------
+# Run example
+# -----------------------------
 res = app.invoke(
     {
-        "question": "Recent AI news",
+        "question": "Batch normalization vs layer normalization",
         "docs": [],
         "good_docs": [],
         "verdict": "",
@@ -324,15 +336,13 @@ res = app.invoke(
         "strips": [],
         "kept_strips": [],
         "refined_context": "",
-        "web_docs": [],   # ✅ added
+        "web_query": "",
+        "web_docs": [],
         "answer": "",
     }
 )
 
-# print("VERDICT:", res["verdict"])
-# print("REASON:", res["reason"])
-# print("\nOUTPUT:\n", res["answer"])
-
-print(f"rewritten_query: {res['web_query']}")
-
-            
+print("VERDICT:", res["verdict"])
+print("REASON:", res["reason"])
+print("WEB_QUERY:", res["web_query"])
+print("\nOUTPUT:\n", res["answer"])           

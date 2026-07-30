@@ -13051,4 +13051,524 @@ def generate_blog(topic):
 
 ## 027. Advanced RAG: How Corrective RAG (CRAG) Solves Traditional RAG Problems (1:15:08)
 
+## Corrective RAG (CRAG) Implementation in LangGraph
+
+This tutorial provides a comprehensive deep dive into **Corrective RAG (CRAG)** – an improved version of traditional RAG that doesn't blindly trust retrieved documents. The video covers:
+
+1. **The problem with traditional RAG** – blind trust leads to hallucinations when irrelevant documents are retrieved.
+2. **The CRAG architecture** – adds a retrieval evaluator, knowledge refinement, web search, and query rewriting.
+3. **Step‑by‑step implementation** – 5 iterations building from basic RAG to full CRAG in LangGraph.
+4. **Three verdict paths**: Correct, Incorrect, Ambiguous – each handled differently.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Traditional RAG problem** | LLM blindly trusts retrieved documents. If irrelevant documents are retrieved, the LLM may hallucinate or give incorrect answers. |
+| 2 | **CRAG (Corrective RAG)** | A RAG variant that evaluates retrieved documents and takes corrective actions when retrieval quality is poor. |
+| 3 | **Retrieval Evaluator** | A model that assesses the relevance of each retrieved document to the query, giving a score (0‑1). |
+| 4 | **Three verdicts** | **Correct** (at least one doc scores > 0.7), **Incorrect** (all docs score < 0.3), **Ambiguous** (mixed scores). |
+| 5 | **Knowledge Refinement** | Decompose documents into sentence strips, filter irrelevant strips, recompose into refined context. |
+| 6 | **Web Search Integration** | When retrieval is incorrect, use Tavily (or similar) to search the web for up‑to‑date information. |
+| 7 | **Query Rewriting** | Before web search, rewrite the user query into a search‑engine‑optimized query (adds time constraints, keywords). |
+| 8 | **Ambiguous handling** | Merge both internal (retrieved) and external (web) knowledge for a comprehensive context. |
+| 9 | **Paper reference** | CRAG was introduced in a 2024 paper using T5‑Large transformers fine‑tuned for filtering and evaluation. |
+| 10 | **Implementation approach** | 5 iterative improvements: Basic RAG → Refinement → Evaluation → Web Search → Query Rewriting → Ambiguous handling. |
+
+---
+
+## 1. The Problem with Traditional RAG
+
+### Traditional RAG Workflow
+
+```
+User Query → Embed → Vector Search → Retrieved Documents → LLM (with context) → Answer
+```
+
+### The Problem: Blind Trust
+
+When the retriever returns irrelevant documents, the LLM **blindly trusts** them and tries to generate an answer – leading to **hallucinations**.
+
+**Example:**
+- Query: "What is a transformer in deep learning?"
+- The vector database (containing only ML books) returns documents about MLP, CNNs, and regularization.
+- The LLM, forced to answer from these documents, hallucinates a response about transformers (even though the documents don't mention transformers).
+
+**Why this is dangerous:** In business settings, giving wrong information about leave policies, contracts, or compliance can have serious consequences.
+
+---
+
+## 2. CRAG Architecture – The Solution
+
+### Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| **Retrieval Evaluator** | Scores each retrieved document for relevance to the query (0‑1 scale). |
+| **Knowledge Refinement** | Decomposes documents into sentence strips, filters irrelevant ones, recomposes. |
+| **Web Search** | Fetches external knowledge when internal retrieval is insufficient. |
+| **Query Rewriting** | Optimizes user queries for search engines before web search. |
+
+### Three Verdicts
+
+| Verdict | Condition | Action |
+|---------|-----------|--------|
+| **Correct** | At least one doc scores > 0.7 | Use refined internal documents only. |
+| **Incorrect** | All docs score < 0.3 | Rewrite query → Web search → Use external docs only. |
+| **Ambiguous** | Some docs between 0.3‑0.7, none > 0.7 | Use internal + external (merged) knowledge. |
+
+### Original Paper Architecture
+
+```mermaid
+graph TD
+    Q[User Query X] --> R[Retrieve Documents D1, D2]
+    R --> E[Retrieval Evaluator]
+    E -->|Correct| K1[Knowledge Refinement]
+    E -->|Incorrect| S[Web Search]
+    E -->|Ambiguous| K2[Knowledge Refinement + Web Search]
+    K1 --> G[Generate Answer]
+    S --> G
+    K2 --> G
+```
+
+---
+
+## 3. Iteration 1: Knowledge Refinement (Decomposition + Filtration)
+
+### Problem
+
+When documents are chunked (e.g., 900 characters per chunk), each chunk may contain:
+- Relevant information (e.g., "Gradient descent is an optimization algorithm...")
+- Irrelevant information (e.g., "CNNs are effective for image processing...")
+
+### Solution: 3‑Step Refinement
+
+**Step 1: Decomposition** – Break each document into sentence strips.
+
+```python
+def decompose_to_sentences(text: str) -> List[str]:
+    # Split text into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return sentences
+```
+
+**Step 2: Filtration** – For each strip, ask an LLM if it's relevant to the query.
+
+```python
+from pydantic import BaseModel
+
+class RelevanceDecision(BaseModel):
+    keep: bool
+
+def filter_strips(query: str, strips: List[str]) -> List[str]:
+    kept = []
+    for strip in strips:
+        prompt = f"""
+        Query: {query}
+        Sentence: {strip}
+        Is this sentence relevant to answering the query? Return keep: true/false.
+        """
+        decision = filter_llm.invoke(prompt)
+        if decision.keep:
+            kept.append(strip)
+    return kept
+```
+
+**Step 3: Recomposition** – Combine the kept strips back into a refined context.
+
+```python
+def recompose_context(kept_strips: List[str]) -> str:
+    return " ".join(kept_strips)
+```
+
+### Code Implementation (Refine Node)
+
+```python
+def refine_node(state: State) -> State:
+    query = state["question"]
+    docs = state["documents"]
+    
+    all_strips = []
+    for doc in docs:
+        strips = decompose_to_sentences(doc.page_content)
+        all_strips.extend(strips)
+    
+    kept_strips = []
+    for strip in all_strips:
+        decision = filter_chain.invoke({"query": query, "sentence": strip})
+        if decision.keep:
+            kept_strips.append(strip)
+    
+    refined_context = recompose_context(kept_strips)
+    
+    return {
+        "strips": all_strips,
+        "kept_strips": kept_strips,
+        "refined_context": refined_context
+    }
+```
+
+---
+
+## 4. Iteration 2: Retrieval Evaluation
+
+### Threshold Logic
+
+```python
+LOWER_THRESHOLD = 0.3
+UPPER_THRESHOLD = 0.7
+```
+
+| Condition | Verdict |
+|-----------|---------|
+| Any doc score > 0.7 | **Correct** |
+| All doc scores < 0.3 | **Incorrect** |
+| Otherwise | **Ambiguous** |
+
+### Pydantic Schema for Evaluation
+
+```python
+from pydantic import BaseModel
+
+class EvaluationResult(BaseModel):
+    score: float  # 0 to 1
+    reason: str   # Why this score was given
+
+class VerdictResult(BaseModel):
+    verdict: Literal["correct", "incorrect", "ambiguous"]
+    reason: str
+```
+
+### Evaluation Node
+
+```python
+def evaluate_retrieval(state: State) -> State:
+    query = state["question"]
+    docs = state["documents"]
+    
+    scores = []
+    reasons = []
+    good_docs = []
+    
+    for doc in docs:
+        result = evaluator_chain.invoke({
+            "query": query,
+            "document": doc.page_content
+        })
+        scores.append(result.score)
+        reasons.append(result.reason)
+        if result.score > LOWER_THRESHOLD:
+            good_docs.append(doc)
+    
+    # Determine verdict
+    if any(s > UPPER_THRESHOLD for s in scores):
+        verdict = "correct"
+        reason = "At least one document scored above threshold"
+    elif all(s < LOWER_THRESHOLD for s in scores):
+        verdict = "incorrect"
+        reason = "All documents scored below threshold"
+    else:
+        verdict = "ambiguous"
+        reason = "Mixed signals received"
+    
+    return {
+        "scores": scores,
+        "reasons": reasons,
+        "good_docs": good_docs,
+        "verdict": verdict,
+        "verdict_reason": reason
+    }
+```
+
+---
+
+## 5. Iteration 3: Web Search Integration
+
+### When Web Search is Triggered
+
+When the verdict is **"incorrect"**, we perform web search using Tavily.
+
+### Tavily Setup
+
+```python
+from langchain_community.tools import TavilySearchResults
+
+# Requires API key in environment
+tavily = TavilySearchResults(max_results=6)
+
+def web_search_node(state: State) -> State:
+    query = state["question"]
+    results = tavily.invoke(query)
+    
+    web_docs = []
+    for result in results:
+        web_docs.append({
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "content": result.get("content", ""),
+            "source": result.get("source", "")
+        })
+    
+    return {"web_docs": web_docs}
+```
+
+### Updated Refine Node (Supports Both Internal and External)
+
+```python
+def refine_node(state: State) -> State:
+    verdict = state["verdict"]
+    
+    if verdict == "correct":
+        source_docs = state["good_docs"]  # Internal only
+    elif verdict == "incorrect":
+        source_docs = state["web_docs"]   # External only
+    elif verdict == "ambiguous":
+        source_docs = state["good_docs"] + state["web_docs"]  # Both
+    
+    # Apply knowledge refinement to source_docs
+    # ... (decompose → filter → recompose) ...
+    return state
+```
+
+---
+
+## 6. Iteration 4: Query Rewriting
+
+### Why Rewrite Queries?
+
+User queries are often:
+- Vague (e.g., "AI news")
+- Under‑specified (missing time constraints)
+- Not optimized for search engines
+
+### Rewriting Process
+
+```python
+from pydantic import BaseModel
+
+class SearchQuery(BaseModel):
+    query: str
+
+def rewrite_query_node(state: State) -> State:
+    original_query = state["question"]
+    
+    prompt = """
+    You are a web search query composer.
+    Rewrite the user query into an optimized search engine query.
+    If the query implies recency, add time constraints (e.g., "last 30 days").
+    Return only the rewritten query.
+    """
+    
+    result = rewrite_llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=original_query)
+    ])
+    
+    return {"web_query": result.content}
+```
+
+### Example
+
+| Original Query | Rewritten Query |
+|----------------|-----------------|
+| "Recent AI news" | "Recent AI news last 30 days" |
+| "Latest ChatGPT updates" | "ChatGPT updates last month 2026" |
+
+---
+
+## 7. Iteration 5: Handling Ambiguous Verdict
+
+### The Ambiguous Case
+
+- No document scores > 0.7 (not fully reliable)
+- Some documents score > 0.3 (partially useful)
+
+### Solution: Merge Internal + External Knowledge
+
+```python
+def refine_node(state: State) -> State:
+    if state["verdict"] == "correct":
+        docs = state["good_docs"]
+    elif state["verdict"] == "incorrect":
+        docs = state["web_docs"]
+    elif state["verdict"] == "ambiguous":
+        # MERGE both internal and external knowledge
+        docs = state["good_docs"] + state["web_docs"]
+    
+    # Now apply refinement to the merged docs
+    return refine_docs(docs)
+```
+
+### Refined Graph Structure
+
+```
+START → Retrieve → Evaluate
+                      ↓
+              ┌───────┴───────┐
+              ↓               ↓
+         Correct        Not Correct
+              ↓               ↓
+          Refine        Rewrite Query
+              ↓               ↓
+          Generate         Web Search
+                              ↓
+                          Refine
+                              ↓
+                          Generate
+```
+
+**Note:** For "ambiguous", we pass both `good_docs` and `web_docs` to Refine, so the LLM gets the best of both worlds.
+
+---
+
+## 8. Full Graph Code (Final Implementation)
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing import TypedDict, Annotated, List, Literal
+import operator
+
+# ---------- State ----------
+class State(TypedDict):
+    question: str
+    documents: List[Document]
+    good_docs: List[Document]
+    web_docs: List[Document]
+    strips: List[str]
+    kept_strips: List[str]
+    refined_context: str
+    scores: List[float]
+    reasons: List[str]
+    verdict: Literal["correct", "incorrect", "ambiguous"]
+    verdict_reason: str
+    web_query: str
+    answer: str
+
+# ---------- Nodes ----------
+def retrieve_node(state: State) -> State:
+    docs = retriever.invoke(state["question"])
+    return {"documents": docs}
+
+def evaluate_node(state: State) -> State:
+    # ... evaluation logic (scores, good_docs, verdict) ...
+    return state
+
+def rewrite_query_node(state: State) -> State:
+    # ... rewrite query for web search ...
+    return {"web_query": rewritten}
+
+def web_search_node(state: State) -> State:
+    results = tavily.invoke(state["web_query"])
+    web_docs = [...]
+    return {"web_docs": web_docs}
+
+def refine_node(state: State) -> State:
+    # Choose source based on verdict
+    if state["verdict"] == "correct":
+        source = state["good_docs"]
+    elif state["verdict"] == "incorrect":
+        source = state["web_docs"]
+    else:  # ambiguous
+        source = state["good_docs"] + state["web_docs"]
+    
+    # Refine: decompose → filter → recompose
+    refined_context = refine_docs(source, state["question"])
+    return {"refined_context": refined_context}
+
+def generate_node(state: State) -> State:
+    prompt = f"""
+    Answer the question using only the context provided.
+    Context: {state["refined_context"]}
+    Question: {state["question"]}
+    If the answer is not in the context, say "I don't know".
+    """
+    answer = llm.invoke(prompt)
+    return {"answer": answer.content}
+
+# ---------- Router ----------
+def router_after_evaluation(state: State) -> Literal["refine", "rewrite_query"]:
+    if state["verdict"] == "correct":
+        return "refine"
+    else:
+        return "rewrite_query"
+
+# ---------- Build Graph ----------
+graph = StateGraph(State)
+graph.add_node("retrieve", retrieve_node)
+graph.add_node("evaluate", evaluate_node)
+graph.add_node("rewrite_query", rewrite_query_node)
+graph.add_node("web_search", web_search_node)
+graph.add_node("refine", refine_node)
+graph.add_node("generate", generate_node)
+
+graph.add_edge(START, "retrieve")
+graph.add_edge("retrieve", "evaluate")
+
+graph.add_conditional_edges(
+    "evaluate",
+    router_after_evaluation,
+    {
+        "refine": "refine",
+        "rewrite_query": "rewrite_query"
+    }
+)
+
+graph.add_edge("rewrite_query", "web_search")
+graph.add_edge("web_search", "refine")
+graph.add_edge("refine", "generate")
+graph.add_edge("generate", END)
+
+app = graph.compile()
+```
+
+---
+
+## 9. Testing the System
+
+### Test 1: Correct Verdict
+
+**Query:** "What is bias-variance tradeoff?"  
+**Result:** Verdict = correct. Uses internal documents only. Answer is accurate.
+
+### Test 2: Incorrect Verdict
+
+**Query:** "AI news from last month"  
+**Result:** Verdict = incorrect. Rewrites query → Web search → Uses external docs → Generates answer.
+
+### Test 3: Ambiguous Verdict
+
+**Query:** "Batch normalization vs layer normalization"  
+**Result:** Verdict = ambiguous. Uses internal (batch norm) + external (layer norm) → Merged answer.
+
+---
+
+## 10. Key Takeaways
+
+| Concept | Key Insight |
+|---------|-------------|
+| **Traditional RAG** | Blind trust in retrieval → hallucinations. |
+| **CRAG** | Evaluates retrieval quality before generation. |
+| **Retrieval Evaluator** | Scores each document; prevents blind trust. |
+| **Knowledge Refinement** | Decompose → filter → recompose; removes irrelevant content. |
+| **Web Search** | Fallback when internal retrieval fails. |
+| **Query Rewriting** | Optimizes queries for search engines. |
+| **Ambiguous Handling** | Merges internal + external knowledge. |
+| **Implementation** | 5 iterations from basic RAG to full CRAG. |
+
+---
+
+## 11. Practical Recommendations
+
+- **Thresholds (0.3 and 0.7)** – tune based on your domain and data.
+- **T5‑Large** – the original paper used a fine‑tuned T5‑Large for filtering and evaluation (faster and cheaper than LLMs).
+- **Tavily** – use Tavily or similar search tools for web search; requires an API key.
+- **LangGraph** – the graph structure makes it easy to implement complex conditional flows and reuse nodes (like `refine` for both internal and external documents).
+
+---
+
+## 028. Self-RAG Tutorial: How to Make Your AI Fact-Check Itself (1:08:39)
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
