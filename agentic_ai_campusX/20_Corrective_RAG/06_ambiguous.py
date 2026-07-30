@@ -1,5 +1,5 @@
 
-# CRAG using with ambiguous knowledge handling
+# CRAG with ambiguous knowledge handling
 
 from typing import List, TypedDict, Literal
 from pydantic import BaseModel
