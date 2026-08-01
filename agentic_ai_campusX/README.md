@@ -13652,27 +13652,42 @@ Traditional RAG never verifies if the generated answer is actually grounded in t
 
 ## 3. Architectural Overview
 
+```mermaid
+flowchart TD
+    START([User question]) --> NEED{Is retrieval needed?}
+
+    NEED -- No --> DIRECT[Generate from model knowledge]
+    DIRECT --> FINAL([Return answer])
+
+    NEED -- Yes --> RETRIEVE[Retrieve internal documents]
+    RETRIEVE --> REL{Grade document relevance}
+
+    REL -- Relevant documents --> CONTEXT[Build grounded context]
+    REL -- No relevant documents --> WEBQ[Rewrite query for web search]
+    WEBQ --> WEB[Search the web]
+    WEB --> WEBREL{Grade web-result relevance}
+    WEBREL -- Relevant results --> CONTEXT
+    WEBREL -- No relevant results --> NOANSWER[Return: no supported answer found]
+
+    CONTEXT --> GENERATE[Generate answer from context]
+    GENERATE --> SUPPORT{Is every claim supported?}
+
+    SUPPORT -- Fully supported --> USEFUL{Does it answer the question?}
+    SUPPORT -- Partially supported --> REVISE[Revise using only evidence]
+    SUPPORT -- No support --> REVISE
+    REVISE --> SUPPORT
+
+    USEFUL -- Yes --> FINAL
+    USEFUL -- No --> REWRITE[Rewrite the original query]
+    REWRITE --> RETRIEVE
+
+    NOANSWER --> END([End])
+    FINAL --> END
 ```
-                        START
-                          ↓
-              ┌─ Is Retrieval Needed? ──┐
-              ↓                         ↓
-         Retrieve            Generate Directly
-              ↓                         ↓
-    ┌─ Are Documents Relevant? ────┐   END
-    ↓                               ↓
-Relevant Docs Found        No Relevant Docs
-    ↓                               ↓
-Generate Answer              No Answer Found
-    ↓                               ↓
-┌─ Is Answer Supported? ───┐       END
-↓                           ↓
-Fully Supported   Partially/Not Supported
-↓                           ↓
-Accept Answer        Revise Answer (loop)
-↓                           ↓
-END                 ─────────┘
-```
+
+The architecture uses four reflection gates: **retrieval need**, **document relevance**,
+**answer support**, and **answer usefulness**. Revision and query-rewrite loops should
+always have retry limits in production so the graph cannot run indefinitely.
 
 ---
 
