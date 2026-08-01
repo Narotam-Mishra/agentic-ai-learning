@@ -13571,4 +13571,524 @@ app = graph.compile()
 
 ## 028. Self-RAG Tutorial: How to Make Your AI Fact-Check Itself (1:08:39)
 
+## Self-RAG (Self-Reflective RAG) in LangGraph
+
+This tutorial covers **Self-RAG (Self-Reflective RAG)** – an advanced RAG technique where the LLM actively judges its own retrieval evidence and answers instead of blindly trusting retrieved documents. The video explains:
+
+1. **Three major problems** with traditional RAG (indiscriminate retrieval, blind trust, lack of verification).
+2. **What Self-RAG is** – a self‑reflective architecture that answers four key questions.
+3. **The complete architecture** – step by step implementation in LangGraph.
+4. **Six implementation iterations** – building from a simple foundation to a complete Self-RAG system.
+
+---
+
+## 📌 Important Pointers
+
+| # | Concept | Explanation |
+|---|---------|-------------|
+| 1 | **Self-RAG** | Stands for **Self-Reflective RAG** – the LLM actively judges its own retrieval evidence and answers instead of blindly trusting retrieved documents. |
+| 2 | **Problem 1: Indiscriminate Retrieval** | Traditional RAG retrieves documents even when unnecessary, wasting computation and adding confusing context. |
+| 3 | **Problem 2: Blind Trust** | Traditional RAG blindly trusts retrieved documents. If documents are irrelevant, the LLM hallucinates. |
+| 4 | **Problem 3: No Answer Verification** | Traditional RAG never verifies if the generated answer is actually grounded in the retrieved documents. |
+| 5 | **Four Key Questions** | Self-RAG answers: (1) Is retrieval needed? (2) Are retrieved documents relevant? (3) Is the answer grounded (supported)? (4) Is the answer useful for the user? |
+| 6 | **Self-Reflection** | Self-RAG is "conscious" – it reflects on every step and modifies actions based on self-evaluation. |
+| 7 | **Three Support Levels** | Generated answers are classified as: **Fully Supported** (all facts from documents), **Partially Supported** (some facts fabricated), **Not Supported** (completely fabricated/hallucinated). |
+| 8 | **Correction Loop** | If an answer is partially supported or not supported, it goes through a **revision loop** to remove fabricated facts. |
+| 9 | **Usefulness Check** | Even if fully supported, the answer may not actually answer the user's question. Self-RAG checks **usefulness** and, if not useful, rewrites the query and re‑retrieves. |
+| 10 | **Implementation Approach** | 6 iterative steps: Decide retrieval → Filter relevance → Generate from context → Detect hallucinations → Revise answers → Check usefulness with query rewriting. |
+
+---
+
+## 1. Three Major Problems with Traditional RAG
+
+### Problem 1: Indiscriminate/Unnecessary Retrieval
+
+Traditional RAG retrieves documents **even when the LLM can answer from its own parametric knowledge**.
+
+**Example:** User asks "How many seconds are in a minute?" – a simple fact the LLM already knows. But RAG still retrieves documents, adding confusing context and wasting computation.
+
+```python
+# Traditional RAG always retrieves, even for simple questions
+def traditional_rag(query):
+    docs = retriever.invoke(query)  # Always does this
+    context = merge(docs)
+    return llm.invoke(f"Context: {context}\nQuestion: {query}")
+```
+
+### Problem 2: Blind Trust in Documents
+
+Traditional RAG trusts retrieved documents blindly. If the document is irrelevant but semantically related, the LLM hallucinates.
+
+**Example:** Query: "What causes diabetes?" Retrieved document: "Diabetes is a chronic condition that affects how the body processes blood sugar." (This describes **effect**, not **cause**). The LLM, forced to answer from this document, gives a wrong answer.
+
+### Problem 3: No Answer Verification
+
+Traditional RAG never verifies if the generated answer is actually grounded in the retrieved documents. Once the answer is generated, it's presented to the user without checking for hallucinations.
+
+---
+
+## 2. What is Self-RAG?
+
+> **Self-RAG stands for Self-Reflective RAG where the LLM actively judges its own retrieval evidence and answers instead of blindly trusting retrieved documents.**
+
+### The Four Key Questions Self-RAG Answers
+
+| Question | Purpose |
+|----------|---------|
+| **1. Is retrieval needed?** | Should we retrieve documents or answer from parametric knowledge? |
+| **2. Are the retrieved documents relevant?** | Does each document actually help answer the query? |
+| **3. Is the generated answer grounded/supported?** | Are all facts in the answer from retrieved documents? |
+| **4. Is the answer useful?** | Does the answer actually satisfy the user's question? |
+
+### Three Support Levels
+
+| Level | Meaning | Action |
+|-------|---------|--------|
+| **Fully Supported** | All facts are from retrieved documents | Accept and output |
+| **Partially Supported** | Some facts are fabricated | Revise the answer |
+| **Not Supported** | All facts are fabricated | Revise the answer |
+
+---
+
+## 3. Architectural Overview
+
+```
+                        START
+                          ↓
+              ┌─ Is Retrieval Needed? ──┐
+              ↓                         ↓
+         Retrieve            Generate Directly
+              ↓                         ↓
+    ┌─ Are Documents Relevant? ────┐   END
+    ↓                               ↓
+Relevant Docs Found        No Relevant Docs
+    ↓                               ↓
+Generate Answer              No Answer Found
+    ↓                               ↓
+┌─ Is Answer Supported? ───┐       END
+↓                           ↓
+Fully Supported   Partially/Not Supported
+↓                           ↓
+Accept Answer        Revise Answer (loop)
+↓                           ↓
+END                 ─────────┘
+```
+
+---
+
+## 4. Step-by-Step Implementation
+
+### Step 1: Decide if Retrieval is Needed
+
+**Purpose:** Skip retrieval when the LLM can answer from parametric knowledge.
+
+**Code:**
+
+```python
+from pydantic import BaseModel
+from typing import Literal
+
+class ShouldRetrieve(BaseModel):
+    should_retrieve: Literal[True, False]
+
+def decide_retrieval_node(state: State) -> State:
+    prompt = """
+    Decide whether retrieval is needed to answer the question.
+    Return true if the question requires specific facts, citations, or information likely not in the model's parametric knowledge.
+    Return false for general explanations, definitions, or reasoning questions.
+    If unsure, choose true.
+    """
+    
+    decision = llm.with_structured_output(ShouldRetrieve).invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=state["question"])
+    ])
+    
+    return {"need_retrieval": decision.should_retrieve}
+```
+
+**Router:**
+
+```python
+def route_after_retrieval_decision(state: State) -> str:
+    if state["need_retrieval"]:
+        return "retrieve"
+    return "generate_direct"
+```
+
+---
+
+### Step 2: Filter Relevant Documents
+
+**Purpose:** After retrieval, check each document for relevance to the query. Keep only relevant ones.
+
+**Code:**
+
+```python
+class RelevanceDecision(BaseModel):
+    is_relevant: bool
+
+def filter_relevant_docs_node(state: State) -> State:
+    relevant_docs = []
+    
+    for doc in state["documents"]:
+        decision = relevance_llm.invoke([
+            SystemMessage(content="Judge if this document is relevant to the query. Return true only if it helps answer the question."),
+            HumanMessage(content=f"Query: {state['question']}\nDocument: {doc.page_content}")
+        ])
+        if decision.is_relevant:
+            relevant_docs.append(doc)
+    
+    return {"relevant_docs": relevant_docs}
+```
+
+**Router:**
+
+```python
+def route_after_relevance(state: State) -> str:
+    if len(state["relevant_docs"]) > 0:
+        return "generate_from_context"
+    return "no_relevant_docs"
+```
+
+---
+
+### Step 3: Generate Answer from Context
+
+**Purpose:** Generate an answer using only the relevant documents as context.
+
+**Code:**
+
+```python
+def generate_from_context_node(state: State) -> State:
+    # Merge relevant docs into context
+    context = "\n\n".join([doc.page_content for doc in state["relevant_docs"]])
+    
+    prompt = f"""
+    Answer the question using ONLY the provided context.
+    If the answer is not in the context, say "I don't know".
+    
+    Context: {context}
+    Question: {state['question']}
+    """
+    
+    answer = llm.invoke(prompt)
+    return {"context": context, "answer": answer.content}
+```
+
+---
+
+### Step 4: Detect Hallucinations (Support Node)
+
+**Purpose:** Check if the generated answer is fully supported, partially supported, or not supported by the context.
+
+**Code:**
+
+```python
+from pydantic import BaseModel
+from typing import List, Literal
+
+class Evidence(BaseModel):
+    evidence_text: str
+
+class SupportDecision(BaseModel):
+    support: Literal["fully_supported", "partially_supported", "not_supported"]
+    evidence: List[Evidence]
+
+def check_support_node(state: State) -> State:
+    prompt = f"""
+    You are a strict judge of answer grounding.
+    Given the question, the generated answer, and the context, determine:
+    - fully_supported: ALL facts in the answer come from the context.
+    - partially_supported: SOME facts in the answer come from the context, others are fabricated.
+    - not_supported: NO facts in the answer come from the context.
+    
+    Also extract the evidence (specific sentences) that support the answer.
+    
+    Question: {state['question']}
+    Answer: {state['answer']}
+    Context: {state['context']}
+    """
+    
+    decision = support_llm.invoke(prompt)
+    return {"support": decision.support, "evidence": decision.evidence}
+```
+
+---
+
+### Step 5: Revise Answer (Correction Loop)
+
+**Purpose:** If the answer is partially or not supported, revise it to remove fabricated facts.
+
+**Code:**
+
+```python
+def revise_answer_node(state: State) -> State:
+    prompt = f"""
+    You are a strict reviser. Revise the answer so that it is FULLY supported by the context.
+    Remove any facts that are not directly from the context.
+    
+    Question: {state['question']}
+    Current Answer: {state['answer']}
+    Context: {state['context']}
+    
+    Provide ONLY the revised answer.
+    """
+    
+    revised = llm.invoke(prompt)
+    
+    # Increment retry count
+    return {
+        "answer": revised.content,
+        "retries": state.get("retries", 0) + 1
+    }
+```
+
+**Loop Logic:**
+
+```python
+def route_after_support(state: State) -> str:
+    MAX_RETRIES = 5
+    
+    if state["support"] == "fully_supported":
+        return "check_usefulness"
+    elif state.get("retries", 0) >= MAX_RETRIES:
+        return "no_answer_found"
+    else:
+        return "revise_answer"
+```
+
+---
+
+### Step 6: Check Usefulness & Query Rewriting
+
+**Purpose:** Even if the answer is fully supported, it may not actually answer the user's question. Check usefulness, and if not useful, rewrite the query and re-retrieve.
+
+**Code:**
+
+```python
+class UsefulnessDecision(BaseModel):
+    useful: Literal["useful", "not_useful"]
+    reason: str
+
+def check_usefulness_node(state: State) -> State:
+    prompt = f"""
+    Determine if the generated answer actually answers the user's question.
+    
+    Question: {state['question']}
+    Answer: {state['answer']}
+    
+    Return "useful" if the answer directly addresses the question.
+    Return "not_useful" with a reason otherwise.
+    """
+    
+    decision = usefulness_llm.invoke(prompt)
+    return {"is_useful": decision.useful, "usefulness_reason": decision.reason}
+```
+
+**Query Rewriting (when not useful):**
+
+```python
+class RewrittenQuery(BaseModel):
+    rewritten_query: str
+
+def rewrite_query_node(state: State) -> State:
+    prompt = f"""
+    Rewrite the user's question into a query optimized for vector retrieval over internal documents.
+    Preserve key entities and add 2-5 high-signal keywords.
+    
+    Original Question: {state['question']}
+    Previous Attempts: {state.get('retrieval_query', 'none')}
+    Answer was not useful because: {state.get('usefulness_reason', 'unknown')}
+    """
+    
+    decision = rewrite_llm.invoke(prompt)
+    
+    return {
+        "retrieval_query": decision.rewritten_query,
+        "rewrite_tries": state.get("rewrite_tries", 0) + 1
+    }
+```
+
+**Final Router:**
+
+```python
+def route_after_usefulness(state: State) -> str:
+    MAX_REWRITES = 3
+    
+    if state["is_useful"] == "useful":
+        return "finalize"
+    elif state.get("rewrite_tries", 0) >= MAX_REWRITES:
+        return "no_answer_found"
+    else:
+        return "rewrite_query"
+```
+
+---
+
+## 5. Complete Graph Structure
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+graph = StateGraph(State)
+
+# Add nodes
+graph.add_node("decide_retrieval", decide_retrieval_node)
+graph.add_node("retrieve", retrieve_node)
+graph.add_node("filter_relevant", filter_relevant_docs_node)
+graph.add_node("generate_direct", generate_direct_node)
+graph.add_node("generate_from_context", generate_from_context_node)
+graph.add_node("check_support", check_support_node)
+graph.add_node("revise_answer", revise_answer_node)
+graph.add_node("check_usefulness", check_usefulness_node)
+graph.add_node("rewrite_query", rewrite_query_node)
+graph.add_node("finalize", finalize_node)
+graph.add_node("no_answer_found", no_answer_found_node)
+
+# Edges
+graph.add_edge(START, "decide_retrieval")
+
+graph.add_conditional_edges(
+    "decide_retrieval",
+    route_after_retrieval_decision,
+    {
+        "retrieve": "retrieve",
+        "generate_direct": "generate_direct"
+    }
+)
+
+graph.add_edge("retrieve", "filter_relevant")
+
+graph.add_conditional_edges(
+    "filter_relevant",
+    route_after_relevance,
+    {
+        "generate_from_context": "generate_from_context",
+        "no_relevant_docs": "no_answer_found"
+    }
+)
+
+graph.add_edge("generate_from_context", "check_support")
+
+graph.add_conditional_edges(
+    "check_support",
+    route_after_support,
+    {
+        "check_usefulness": "check_usefulness",
+        "revise_answer": "revise_answer",
+        "no_answer_found": "no_answer_found"
+    }
+)
+
+graph.add_edge("revise_answer", "check_support")  # Loop back
+
+graph.add_conditional_edges(
+    "check_usefulness",
+    route_after_usefulness,
+    {
+        "finalize": "finalize",
+        "rewrite_query": "rewrite_query",
+        "no_answer_found": "no_answer_found"
+    }
+)
+
+graph.add_edge("rewrite_query", "retrieve")  # Loop back
+
+graph.add_edge("finalize", END)
+graph.add_edge("no_answer_found", END)
+graph.add_edge("generate_direct", END)
+
+app = graph.compile()
+```
+
+---
+
+## 6. Testing the System
+
+### Test 1: Answer in Documents (Fully Supported)
+
+**Query:** "Who is the CEO of Nexa AI?"  
+**Result:** Retrieval needed → Documents retrieved → Relevant docs filtered → Answer generated → Fully Supported → Useful → Output answer.
+
+### Test 2: Answer Not in Documents (Not Supported)
+
+**Query:** "What is Nexa AI's refund policy?"  
+**Result:** Retrieval needed → Documents retrieved → No relevant docs → No answer found → Output "No relevant documents found."
+
+### Test 3: Partially Supported (Hallucination Detected)
+
+**Query:** "Describe Nexa AI company culture."  
+**Result:** Retrieval needed → Documents retrieved → Answer generated → **Partially Supported** (some facts fabricated) → Revision loop → Revised answer becomes Fully Supported → Useful → Output corrected answer.
+
+### Test 4: Not Useful (Query Rewriting)
+
+**Query:** "Company culture" (vague query)  
+**Result:** Retrieval needed → Documents retrieved → Answer generated → Fully Supported → **Not Useful** (doesn't directly answer) → Query rewritten → Re-retrieve → New answer → Useful → Output answer.
+
+---
+
+## 7. Key Takeaways
+
+| Concept | Key Insight |
+|---------|-------------|
+| **Self-RAG** | Uses self-reflection to avoid blind trust in retrieved documents. |
+| **Four Questions** | Is retrieval needed? Are docs relevant? Is answer supported? Is answer useful? |
+| **Three Support Levels** | Fully, Partially, Not Supported – enables hallucination detection. |
+| **Revision Loop** | Fixes hallucinated answers by removing unsupported facts. |
+| **Query Rewriting** | Optimizes queries when answers aren't useful. |
+| **Implementation** | 6 iterative steps building from basic to complete Self-RAG. |
+| **Why It Matters** | Prevents hallucinations, avoids unnecessary retrieval, and ensures answers are both grounded and useful. |
+
+---
+
+## 8. Complete State Definition
+
+```python
+from typing import TypedDict, List, Literal, Optional
+from langchain_core.documents import Document
+
+class State(TypedDict):
+    # User input
+    question: str
+    
+    # Retrieval decision
+    need_retrieval: Optional[bool]
+    
+    # Retrieval results
+    documents: List[Document]
+    relevant_docs: List[Document]
+    context: str
+    
+    # Generation
+    answer: str
+    direct_answer: str
+    
+    # Support check (hallucination detection)
+    support: Optional[Literal["fully_supported", "partially_supported", "not_supported"]]
+    evidence: List[str]
+    retries: int
+    
+    # Usefulness check
+    is_useful: Optional[Literal["useful", "not_useful"]]
+    usefulness_reason: Optional[str]
+    retrieval_query: str
+    rewrite_tries: int
+    
+    # Final
+    final_answer: str
+```
+
+---
+
+## 9. Practical Recommendations
+
+- **Thresholds:** Use MAX_RETRIES = 3-5 and MAX_REWRITES = 2-3 to prevent infinite loops.
+- **Model Selection:** The original Self-RAG paper used fine-tuned models. Here we use standard LLMs with structured output.
+- **Prompt Engineering:** Detailed system prompts are critical for correct self-reflection.
+- **LangGraph Benefits:** The graph structure makes the complex conditional flows and loops easy to implement.
+- **Testing:** Test with queries inside and outside the document corpus to validate each component.
+
+---
+
 summaries this agentic ai tutorial transcript in simple words with all detail, make note of all important pointers and also explain each important concepts with basic code examples
